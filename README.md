@@ -58,7 +58,6 @@ The final output provides empirically grounded guidelines for practitioners to d
 | **Language** | Indonesian |
 | **Architectures** | IndoBERT (Base, Large, Lite), NusaBERT |
 | **Frameworks** | PyTorch, Hugging Face Transformers |
-| **Analysis Tools** | IBM Bob (Claude 3.7 Sonnet) |
 | **Statistical Tests** | McNemar, Cohen's h, Bootstrap CI |
 
 ---
