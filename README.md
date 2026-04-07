@@ -61,4 +61,4 @@ The final output provides empirically grounded guidelines for practitioners to d
 | **Statistical Tests** | McNemar, Cohen's h, Bootstrap CI |
 
 ---
-*This projecrt provides the first joint evaluation of robustness, stability, and reliability for Indonesian NLP under domain shift and resource constraints.*
+*This project provides the first joint evaluation of robustness, stability, and reliability for Indonesian NLP under domain shift and resource constraints.*
