@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-This repository contains the experimental framework and methodology for a comprehensive evaluation of Indonesian Natural Language Processing (NLP) models. The research focuses on the performance of Transformer based architectures when subjected to domain shift and resource constraints. 
+This repository contains methodology for a comprehensive evaluation of Indonesian Natural Language Processing (NLP) models. The research focuses on the performance of Transformer based architectures when subjected to domain shift and resource constraints. 
 
 A primary objective of this study is the rigorous assessment of **Robustness**, examining how models maintain performance across varied linguistic environments and under significant input noise.
 
@@ -33,7 +33,7 @@ Data is collected from multi-domain Indonesian corpora and partitioned into Sour
 All models are fine-tuned on the Source Domain using a consistent hyperparameter configuration. This controlled setup allows for a direct comparison of how model capacity and architecture influence resulting robustness and efficiency.
 
 ### Phase 4: Multi-Dimensional Evaluation
-The evaluation framework addresses five core research questions:
+The evaluation addresses five core research questions:
 * **RQ1 (Domain Robustness):** Cross-domain performance measured via F1 and Macro-F1 scores.
 * **RQ2 (Perturbation Robustness):** Analysis of degradation curves based on performance deltas versus clean data.
 * **RQ3 (Prediction Stability):** Assessment of label flip rates across semantically equivalent inputs.
@@ -61,4 +61,4 @@ The final output provides empirically grounded guidelines for practitioners to d
 | **Statistical Tests** | McNemar, Cohen's h, Bootstrap CI |
 
 ---
-*This framework provides the first joint evaluation of robustness, stability, and reliability for Indonesian NLP under domain shift and resource constraints.*
+*This projecrt provides the first joint evaluation of robustness, stability, and reliability for Indonesian NLP under domain shift and resource constraints.*
