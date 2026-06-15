@@ -46,13 +46,71 @@ class DataManager:
         
         np.random.seed(random_seed)
         logger.info(f"DataManager initialized with seed={random_seed}, max_length={max_length}")
+    @classmethod
+    def from_dataset_directory(
+        cls,
+        dataset_dir: str = "dataset",
+        tokenizer_name: str = "indobenchmark/indobert-base-p1",
+        max_length: int = 128,
+        random_seed: int = 42
+    ) -> 'DataManager':
+        """
+        Create a DataManager instance and load all domain CSV files from a directory.
+        
+        Expected files: technology.csv, politic.csv, health.csv, sport.csv, education.csv
+        
+        Args:
+            dataset_dir: Path to directory containing domain CSV files
+            tokenizer_name: Name or path of the tokenizer to use
+            max_length: Maximum sequence length for tokenization
+            random_seed: Random seed for reproducibility
+            
+        Returns:
+            DataManager instance with loaded datasets
+            
+        Raises:
+            FileNotFoundError: If dataset directory or required files not found
+        """
+        if not os.path.exists(dataset_dir):
+            raise FileNotFoundError(f"Dataset directory not found: {dataset_dir}")
+        
+        # Define expected domain files
+        domain_files = {
+            'Technology': 'technology.csv',
+            'Politics': 'politic.csv',
+            'Health': 'health.csv',
+            'Sport': 'sport.csv',
+            'Education': 'education.csv'
+        }
+        
+        csv_paths = []
+        domain_names = []
+        
+        for domain_name, filename in domain_files.items():
+            filepath = os.path.join(dataset_dir, filename)
+            if not os.path.exists(filepath):
+                raise FileNotFoundError(f"Required domain file not found: {filepath}")
+            csv_paths.append(filepath)
+            domain_names.append(domain_name)
+        
+        # Create instance and load datasets
+        manager = cls(tokenizer_name=tokenizer_name, max_length=max_length, random_seed=random_seed)
+        manager.load_datasets(csv_paths, domain_names)
+        
+        return manager
     
-    def load_datasets(self, csv_paths: List[str]) -> pd.DataFrame:
+    
+    def load_datasets(self, csv_paths: List[str], domain_names: Optional[List[str]] = None) -> pd.DataFrame:
         """
         Load multiple CSV files (one per domain) and combine them.
         
+        CSV Schema: id, source, date, title, Label, url
+        The 'title' column is used as text input, 'Label' as the target.
+        
         Args:
             csv_paths: List of paths to CSV files
+            domain_names: Optional list of domain names corresponding to each CSV.
+                         If None, extracts from filename (e.g., 'technology.csv' -> 'technology')
             
         Returns:
             Combined DataFrame with all domains
@@ -63,15 +121,32 @@ class DataManager:
         """
         logger.info(f"Loading {len(csv_paths)} CSV files")
         
+        if domain_names and len(domain_names) != len(csv_paths):
+            raise ValueError(
+                f"Number of domain names ({len(domain_names)}) must match "
+                f"number of CSV paths ({len(csv_paths)})"
+            )
+        
         dataframes = []
-        for path in csv_paths:
+        for idx, path in enumerate(csv_paths):
             if not os.path.exists(path):
                 raise FileNotFoundError(f"CSV file not found: {path}")
             
             df = pd.read_csv(path)
             self._validate_dataframe(df, path)
+            
+            # Extract domain name from filename if not provided
+            if domain_names:
+                domain = domain_names[idx]
+            else:
+                domain = os.path.splitext(os.path.basename(path))[0].capitalize()
+            
+            # Rename columns to standardized format
+            df = df.rename(columns={'title': 'text', 'Label': 'label'})
+            df['domain'] = domain
+            
             dataframes.append(df)
-            logger.info(f"Loaded {len(df)} samples from {os.path.basename(path)}")
+            logger.info(f"Loaded {len(df)} samples from {os.path.basename(path)} (domain: {domain})")
         
         self.raw_data = pd.concat(dataframes, ignore_index=True)
         self.domains = sorted(self.raw_data['domain'].unique().tolist())
@@ -86,14 +161,15 @@ class DataManager:
         """
         Validate DataFrame structure and content.
         
+        Expected CSV schema: id, source, date, title, Label, url
+    
         Args:
             df: DataFrame to validate
             source: Source file path for error messages
-            
         Raises:
             ValueError: If validation fails
         """
-        required_columns = ['text', 'label', 'domain']
+        required_columns = ['id', 'source', 'date', 'title', 'Label', 'url']
         missing_columns = [col for col in required_columns if col not in df.columns]
         
         if missing_columns:
@@ -102,14 +178,11 @@ class DataManager:
                 f"Expected columns: {required_columns}"
             )
         
-        if df['text'].isnull().any():
-            raise ValueError(f"Found null values in 'text' column in {source}")
+        if df['title'].isnull().any():
+            raise ValueError(f"Found null values in 'title' column in {source}")
         
-        if not df['label'].isin([0, 1]).all():
+        if not df['Label'].isin([0, 1]).all():
             raise ValueError(f"Labels must be binary (0 or 1) in {source}")
-        
-        if df['domain'].isnull().any():
-            raise ValueError(f"Found null values in 'domain' column in {source}")
     
     def stratified_split(
         self,
@@ -124,10 +197,8 @@ class DataManager:
             train_size: Proportion of data for training (default: 0.70)
             val_size: Proportion of data for validation (default: 0.15)
             test_size: Proportion of data for testing (default: 0.15)
-            
         Returns:
             Tuple of (train_df, val_df, test_df)
-            
         Raises:
             ValueError: If proportions don't sum to 1.0 or data not loaded
         """
@@ -211,10 +282,8 @@ class DataManager:
             texts: List of text strings to preprocess
             padding: Padding strategy ('max_length', 'longest', or False)
             truncation: Whether to truncate sequences exceeding max_length
-            
         Returns:
             Dictionary containing input_ids, attention_mask, and token_type_ids
-            
         Raises:
             RuntimeError: If tokenizer not initialized
         """
@@ -249,10 +318,8 @@ class DataManager:
     ) -> Dict[str, pd.DataFrame]:
         """
         Organize DataFrame by domain for domain-specific operations.
-        
         Args:
             df: DataFrame to organize
-            
         Returns:
             Dictionary mapping domain names to their respective DataFrames
         """
@@ -269,10 +336,8 @@ class DataManager:
     def get_domain_statistics(self, df: pd.DataFrame) -> Dict[str, Dict]:
         """
         Calculate statistics for each domain in the dataset.
-        
         Args:
             df: DataFrame to analyze
-            
         Returns:
             Dictionary with statistics for each domain
         """
@@ -298,10 +363,8 @@ class DataManager:
     ) -> Dict[Tuple[str, str], pd.DataFrame]:
         """
         Create test sets for all source-target domain combinations.
-        
         Args:
             test_df: Test DataFrame containing all domains
-            
         Returns:
             Dictionary mapping (source_domain, target_domain) tuples to DataFrames
         """
@@ -385,11 +448,9 @@ class DatasetValidator:
     def validate_balance(df: pd.DataFrame, threshold: float = 0.3) -> bool:
         """
         Check if dataset is reasonably balanced.
-        
         Args:
             df: DataFrame to validate
             threshold: Maximum acceptable deviation from 50-50 split
-            
         Returns:
             True if balanced within threshold, False otherwise
         """
@@ -410,10 +471,8 @@ class DatasetValidator:
     def check_text_quality(df: pd.DataFrame) -> Dict[str, int]:
         """
         Check for potential text quality issues.
-        
         Args:
             df: DataFrame to check
-            
         Returns:
             Dictionary with counts of various quality issues
         """
@@ -434,10 +493,8 @@ class DatasetValidator:
     def validate_domain_distribution(df: pd.DataFrame) -> bool:
         """
         Check if domains are reasonably distributed.
-        
         Args:
             df: DataFrame to validate
-            
         Returns:
             True if distribution is acceptable, False otherwise
         """
