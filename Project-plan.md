@@ -1,5 +1,6 @@
 # IndoBERT Clickbait Detection: Robustness Evaluation System
 ## Project Plan and Technical Specification
+By Grace Esther Simanjuntak, Angela Valerie Christy, Khansa Nabilah Awali.
 
 ---
 
