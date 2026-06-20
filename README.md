@@ -1,5 +1,5 @@
 # IndoBERT Clickbait Detection: Robustness Evaluation System
-By Grace Esther Simanjuntak, Angela Valerie Christy, Khansa Nabilah Awali.
+By Grace Esther Simanjuntak, Angela Valerie Christy, Khansa Nabilah Awali | BINUS University, Jakarta, ID.
 ## Overview
 
 This repository contains the end-to-end robustness evaluation system for Indonesian clickbait detection using various IndoBERT model variants. The system systematically evaluates model performance against domain shifts and linguistic perturbations, providing a scientifically rigorous framework to assess model reliability in real-world scenarios.
