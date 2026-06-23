@@ -846,5 +846,3 @@ class EvaluationEngine:
         logger.info(f"Summary report saved to {report_path}")
         
         return report
-
-# Made with Bob
