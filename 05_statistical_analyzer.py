@@ -951,5 +951,3 @@ class StatisticalAnalyzer:
             ])
         
         return lines
-
-# Made with Bob
