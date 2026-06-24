@@ -476,10 +476,10 @@ def main():
         )
         
         if results['status'] == 'success':
-            logger.info("✅ Evaluation pipeline completed successfully")
+            logger.info("Evaluation pipeline completed successfully")
             sys.exit(0)
         else:
-            logger.error(f"❌ Evaluation pipeline failed: {results.get('reason', 'unknown')}")
+            logger.error(f"Evaluation pipeline failed: {results.get('reason', 'unknown')}")
             sys.exit(1)
         
     except KeyboardInterrupt:
