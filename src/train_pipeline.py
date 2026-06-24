@@ -1,0 +1,443 @@
+"""
+Training Pipeline for IndoBERT Clickbait Detection System
+
+This script orchestrates the complete training process:
+1. Loads and prepares data from 5 CSV files
+2. Trains IndoBERT models (base/large/lite)
+3. Performs hyperparameter optimization (optional)
+4. Saves model checkpoints
+5. Tracks training progress
+
+Usage:
+    # Basic training (single model)
+    python train_pipeline.py --model base
+    
+    # Train all models
+    python train_pipeline.py --model all
+    
+    # With hyperparameter search
+    python train_pipeline.py --model base --grid-search
+    
+    # On Colab
+    !python train_pipeline.py --model base --device cuda
+"""
+
+import os
+import sys
+import argparse
+import logging
+from datetime import datetime
+from typing import Dict, Any
+
+from config import config
+from data_manager import DataManager
+from model_trainer import ModelTrainer, HyperparameterSearch
+from utils import file_manager, reproducibility, Timer, get_timestamp
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+
+class TrainingPipeline:
+    """Orchestrates the complete training pipeline for IndoBERT models."""
+    
+    def __init__(
+        self,
+        dataset_dir: str = "dataset",
+        output_dir: str = "output",
+        checkpoint_dir: str = "checkpoints",
+        device: str = "auto",
+        random_seed: int = 42
+    ):
+        """
+        Initialize training pipeline.
+        
+        Args:
+            dataset_dir: Directory containing CSV files
+            output_dir: Directory for output files
+            checkpoint_dir: Directory for model checkpoints
+            device: Device to use ('cuda', 'cpu', or 'auto')
+            random_seed: Random seed for reproducibility
+        """
+        self.dataset_dir = dataset_dir
+        self.output_dir = output_dir
+        self.checkpoint_dir = checkpoint_dir
+        self.device = device
+        self.random_seed = random_seed
+        
+        reproducibility.set_seed(random_seed)
+        file_manager.ensure_directory(output_dir)
+        file_manager.ensure_directory(checkpoint_dir)
+        
+        logger.info("Training Pipeline initialized")
+        logger.info(f"Dataset: {dataset_dir}, Output: {output_dir}, Checkpoints: {checkpoint_dir}")
+        logger.info(f"Device: {device}, Random seed: {random_seed}")
+    
+    def load_and_prepare_data(self) -> Dict[str, Any]:
+        """
+        Load datasets and perform stratified splitting.
+        
+        Returns:
+            Dictionary with train, val, test DataFrames and data_manager
+        """
+        logger.info("\n[STEP 1] Loading and Preparing Data")
+        
+        with Timer() as timer:
+            data_manager = DataManager.from_dataset_directory(
+                dataset_dir=self.dataset_dir,
+                tokenizer_name=config.model.DEFAULT_MODEL,
+                max_length=config.model.MAX_SEQUENCE_LENGTH,
+                random_seed=self.random_seed
+            )
+            
+            summary = data_manager.get_summary()
+            logger.info(f"Loaded {summary['total_samples']} samples from {len(summary['domains'])} domains")
+            logger.info(f"Label distribution: {summary['label_distribution']}")
+            
+            train_df, val_df, test_df = data_manager.stratified_split(
+                train_size=config.data.TRAIN_SIZE,
+                val_size=config.data.VAL_SIZE,
+                test_size=config.data.TEST_SIZE
+            )
+            
+            splits_dir = os.path.join(self.output_dir, 'data_splits')
+            data_manager.export_splits(train_df, val_df, test_df, splits_dir)
+        
+        logger.info(f"Data preparation completed in {timer.elapsed():.2f}s")
+        
+        return {
+            'data_manager': data_manager,
+            'train_df': train_df,
+            'val_df': val_df,
+            'test_df': test_df
+        }
+    
+    def train_single_model(
+        self,
+        model_name: str,
+        train_df: Any,
+        val_df: Any,
+        perform_grid_search: bool = False
+    ) -> Dict[str, Any]:
+        """
+        Train a single IndoBERT model.
+        
+        Args:
+            model_name: Name of model variant ('base', 'large', 'lite')
+            train_df: Training DataFrame
+            val_df: Validation DataFrame
+            perform_grid_search: Whether to perform hyperparameter search
+            
+        Returns:
+            Dictionary with training results
+        """
+        logger.info(f"\n[STEP 2] Training {model_name.upper()} Model")
+        
+        model_mapping = {
+            'base': config.model.INDOBERT_BASE,
+            'large': config.model.INDOBERT_LARGE,
+            'lite': config.model.INDOBERT_LITE
+        }
+        
+        if model_name not in model_mapping:
+            raise ValueError(f"Invalid model name: {model_name}. Choose from: {list(model_mapping.keys())}")
+        
+        full_model_name = model_mapping[model_name]
+        
+        with Timer() as timer:
+            if perform_grid_search:
+                logger.info("Performing hyperparameter grid search")
+                results = self._train_with_grid_search(
+                    full_model_name, model_name, train_df, val_df
+                )
+            else:
+                logger.info("Training with default hyperparameters")
+                results = self._train_with_defaults(
+                    full_model_name, model_name, train_df, val_df
+                )
+        
+        logger.info(f"Training completed in {timer.elapsed():.2f}s - Best F1: {results['best_f1']:.4f}")
+        
+        return results
+    
+    def _train_with_defaults(
+        self,
+        full_model_name: str,
+        model_name: str,
+        train_df: Any,
+        val_df: Any
+    ) -> Dict[str, Any]:
+        """Train model with default hyperparameters."""
+        
+        trainer = ModelTrainer(
+            model_name=full_model_name,
+            max_length=config.model.MAX_SEQUENCE_LENGTH,
+            device=self.device,
+            random_seed=self.random_seed
+        )
+        
+        model_checkpoint_dir = os.path.join(self.checkpoint_dir, model_name)
+        file_manager.ensure_directory(model_checkpoint_dir)
+        
+        history = trainer.train(
+            train_df=train_df,
+            val_df=val_df,
+            num_epochs=config.training.NUM_EPOCHS,
+            batch_size=config.training.BATCH_SIZE,
+            learning_rate=config.training.LEARNING_RATE,
+            weight_decay=config.training.WEIGHT_DECAY,
+            dropout_rate=config.model.DROPOUT_RATE,
+            early_stopping_patience=config.training.EARLY_STOPPING_PATIENCE,
+            checkpoint_dir=model_checkpoint_dir
+        )
+        
+        history_file = os.path.join(model_checkpoint_dir, 'training_history.json')
+        file_manager.save_json(history, history_file)
+        
+        best_f1 = max(history['val_f1'])
+        
+        return {
+            'model_name': model_name,
+            'full_model_name': full_model_name,
+            'history': history,
+            'best_f1': best_f1,
+            'checkpoint_dir': model_checkpoint_dir,
+            'hyperparameters': {
+                'learning_rate': config.training.LEARNING_RATE,
+                'batch_size': config.training.BATCH_SIZE,
+                'num_epochs': config.training.NUM_EPOCHS,
+                'dropout_rate': config.model.DROPOUT_RATE
+            }
+        }
+    
+    def _train_with_grid_search(
+        self,
+        full_model_name: str,
+        model_name: str,
+        train_df: Any,
+        val_df: Any
+    ) -> Dict[str, Any]:
+        """Train model with hyperparameter grid search."""
+        
+        grid_search = HyperparameterSearch(
+            model_name=full_model_name,
+            param_grid=config.training.GRID_SEARCH_PARAMS,
+            max_length=config.model.MAX_SEQUENCE_LENGTH,
+            device=self.device,
+            random_seed=self.random_seed
+        )
+        
+        search_results = grid_search.search(
+            train_df=train_df,
+            val_df=val_df,
+            num_epochs=config.training.NUM_EPOCHS
+        )
+        
+        model_checkpoint_dir = os.path.join(self.checkpoint_dir, model_name)
+        file_manager.ensure_directory(model_checkpoint_dir)
+        
+        search_file = os.path.join(model_checkpoint_dir, 'grid_search_results.json')
+        grid_search.save_results(search_file)
+        
+        logger.info(f"Training final model with best parameters: {search_results['best_params']}")
+        
+        trainer = ModelTrainer(
+            model_name=full_model_name,
+            max_length=config.model.MAX_SEQUENCE_LENGTH,
+            device=self.device,
+            random_seed=self.random_seed
+        )
+        
+        history = trainer.train(
+            train_df=train_df,
+            val_df=val_df,
+            num_epochs=config.training.NUM_EPOCHS,
+            checkpoint_dir=model_checkpoint_dir,
+            **search_results['best_params']
+        )
+        
+        history_file = os.path.join(model_checkpoint_dir, 'training_history.json')
+        file_manager.save_json(history, history_file)
+        
+        return {
+            'model_name': model_name,
+            'full_model_name': full_model_name,
+            'history': history,
+            'best_f1': search_results['best_f1'],
+            'checkpoint_dir': model_checkpoint_dir,
+            'hyperparameters': search_results['best_params'],
+            'grid_search_results': search_results
+        }
+    
+    def save_pipeline_summary(self, results: Dict[str, Any]) -> None:
+        """
+        Save pipeline execution summary.
+        
+        Args:
+            results: Dictionary with all training results
+        """
+        logger.info("\n[STEP 3] Saving Pipeline Summary")
+        
+        summary = {
+            'timestamp': datetime.now().isoformat(),
+            'dataset_dir': self.dataset_dir,
+            'total_samples': results['data_info']['total_samples'],
+            'domains': results['data_info']['domains'],
+            'models_trained': list(results['models'].keys()),
+            'training_results': {}
+        }
+        
+        for model_name, model_results in results['models'].items():
+            summary['training_results'][model_name] = {
+                'best_f1': model_results['best_f1'],
+                'checkpoint_dir': model_results['checkpoint_dir'],
+                'hyperparameters': model_results['hyperparameters']
+            }
+        
+        summary_file = os.path.join(self.output_dir, 'training_summary.json')
+        file_manager.save_json(summary, summary_file)
+        
+        logger.info(f"Summary saved to {summary_file}")
+        logger.info(f"\nTraining Summary:")
+        logger.info(f"  Total samples: {summary['total_samples']}")
+        logger.info(f"  Domains: {', '.join(summary['domains'])}")
+        logger.info(f"  Models trained: {', '.join(summary['models_trained'])}")
+        logger.info(f"  Best F1 Scores:")
+        for model_name, model_info in summary['training_results'].items():
+            logger.info(f"    {model_name}: {model_info['best_f1']:.4f}")
+    
+    def run(
+        self,
+        models: list = ['base'],
+        perform_grid_search: bool = False
+    ) -> Dict[str, Any]:
+        """
+        Run the complete training pipeline.
+        
+        Args:
+            models: List of model names to train ('base', 'large', 'lite', or 'all')
+            perform_grid_search: Whether to perform hyperparameter search
+            
+        Returns:
+            Dictionary with all training results
+        """
+        logger.info("\nStarting Training Pipeline")
+        logger.info(f"Models: {models}, Grid search: {perform_grid_search}")
+        
+        total_timer = Timer()
+        total_timer.start()
+        
+        data_results = self.load_and_prepare_data()
+        
+        if 'all' in models:
+            models = ['base', 'large', 'lite']
+        
+        training_results = {}
+        for model_name in models:
+            try:
+                model_results = self.train_single_model(
+                    model_name=model_name,
+                    train_df=data_results['train_df'],
+                    val_df=data_results['val_df'],
+                    perform_grid_search=perform_grid_search
+                )
+                training_results[model_name] = model_results
+            except Exception as e:
+                logger.error(f"Failed to train {model_name}: {str(e)}")
+                import traceback
+                traceback.print_exc()
+        
+        results = {
+            'data_info': {
+                'total_samples': data_results['data_manager'].get_summary()['total_samples'],
+                'domains': data_results['data_manager'].get_summary()['domains']
+            },
+            'models': training_results
+        }
+        
+        self.save_pipeline_summary(results)
+        
+        total_time = total_timer.stop()
+        logger.info(f"\nPipeline completed in {total_time:.2f}s ({total_time/60:.2f} minutes)")
+        
+        return results
+
+
+def parse_arguments():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        description='Train IndoBERT models for clickbait detection'
+    )
+    
+    parser.add_argument(
+        '--model', type=str, default='base',
+        choices=['base', 'large', 'lite', 'all'],
+        help='Model variant to train (default: base)'
+    )
+    parser.add_argument(
+        '--dataset-dir', type=str, default='dataset',
+        help='Directory containing CSV files (default: dataset)'
+    )
+    parser.add_argument(
+        '--output-dir', type=str, default='output',
+        help='Directory for output files (default: output)'
+    )
+    parser.add_argument(
+        '--checkpoint-dir', type=str, default='checkpoints',
+        help='Directory for model checkpoints (default: checkpoints)'
+    )
+    parser.add_argument(
+        '--device', type=str, default='auto',
+        choices=['auto', 'cuda', 'cpu'],
+        help='Device to use for training (default: auto)'
+    )
+    parser.add_argument(
+        '--grid-search', action='store_true',
+        help='Perform hyperparameter grid search'
+    )
+    parser.add_argument(
+        '--seed', type=int, default=42,
+        help='Random seed for reproducibility (default: 42)'
+    )
+    
+    return parser.parse_args()
+
+
+def main():
+    """Main entry point."""
+    try:
+        args = parse_arguments()
+        
+        pipeline = TrainingPipeline(
+            dataset_dir=args.dataset_dir,
+            output_dir=args.output_dir,
+            checkpoint_dir=args.checkpoint_dir,
+            device=args.device,
+            random_seed=args.seed
+        )
+        
+        models = [args.model] if args.model != 'all' else ['base', 'large', 'lite']
+        
+        results = pipeline.run(
+            models=models,
+            perform_grid_search=args.grid_search
+        )
+        
+        logger.info("✅ Training pipeline completed successfully")
+        sys.exit(0)
+        
+    except KeyboardInterrupt:
+        logger.info("\nTraining interrupted by user")
+        sys.exit(1)
+    except Exception as e:
+        logger.error(f"\nTraining pipeline failed: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
