@@ -426,7 +426,7 @@ def main():
             perform_grid_search=args.grid_search
         )
         
-        logger.info("✅ Training pipeline completed successfully")
+        logger.info("Training pipeline completed successfully")
         sys.exit(0)
         
     except KeyboardInterrupt:
