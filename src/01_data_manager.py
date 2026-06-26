@@ -184,67 +184,108 @@ class DataManager:
         if not df['Label'].isin([0, 1]).all():
             raise ValueError(f"Labels must be binary (0 or 1) in {source}")
     
-    def stratified_split(
+    def stratified_split_by_domain( #NEW
         self,
         train_size: float = 0.70,
         val_size: float = 0.15,
         test_size: float = 0.15
-    ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    ) -> Dict[str, Dict[str, pd.DataFrame]]:
         """
-        Perform stratified splitting maintaining label and domain distribution.
-        
-        Args:
-            train_size: Proportion of data for training (default: 0.70)
-            val_size: Proportion of data for validation (default: 0.15)
-            test_size: Proportion of data for testing (default: 0.15)
-        Returns:
-            Tuple of (train_df, val_df, test_df)
-        Raises:
-            ValueError: If proportions don't sum to 1.0 or data not loaded
+        Perform stratified splitting INDEPENDENTLY for each domain to support 
+        specialist models and true cross-domain testing.
         """
         if self.raw_data is None:
             raise ValueError("No data loaded. Call load_datasets() first.")
         
         if not np.isclose(train_size + val_size + test_size, 1.0):
-            raise ValueError(
-                f"Split proportions must sum to 1.0. "
-                f"Got: {train_size + val_size + test_size}"
-            )
+            raise ValueError(f"Split proportions must sum to 1.0. Got: {train_size + val_size + test_size}")
         
-        logger.info(f"Performing stratified split: train={train_size}, val={val_size}, test={test_size}")
-        
-        # Create stratification key combining label and domain
-        self.raw_data['stratify_key'] = (
-            self.raw_data['label'].astype(str) + '_' + 
-            self.raw_data['domain'].astype(str)
-        )
-        
-        # First split: separate test set
-        train_val_df, test_df = train_test_split(
-            self.raw_data,
-            test_size=test_size,
-            stratify=self.raw_data['stratify_key'],
-            random_state=self.random_seed
-        )
-        
-        # Second split: separate train and validation
+        logger.info("Performing independent stratified splits per domain...")
+        domain_splits = {}
         val_proportion = val_size / (train_size + val_size)
-        train_df, val_df = train_test_split(
-            train_val_df,
-            test_size=val_proportion,
-            stratify=train_val_df['stratify_key'],
-            random_state=self.random_seed
-        )
         
-        # Remove temporary stratification key
-        for df in [train_df, val_df, test_df]:
-            df.drop('stratify_key', axis=1, inplace=True)
+        for domain in self.domains:
+            domain_df = self.raw_data[self.raw_data['domain'] == domain].copy()
+            
+            train_val_df, test_df = train_test_split(
+                domain_df,
+                test_size=test_size,
+                stratify=domain_df['label'], 
+                random_state=self.random_seed
+            )
+            
+            train_df, val_df = train_test_split(
+                train_val_df,
+                test_size=val_proportion,
+                stratify=train_val_df['label'],
+                random_state=self.random_seed
+            )
+            
+            domain_splits[domain] = {
+                'train': train_df,
+                'val': val_df,
+                'test': test_df
+            }
+            
+            logger.info(f"  {domain} Split -> Train: {len(train_df)}, Val: {len(val_df)}, Test: {len(test_df)}")
+            
+        return domain_splits
+
+    def export_domain_splits( #NEW
+        self, 
+        domain_splits: Dict[str, Dict[str, pd.DataFrame]],
+        output_dir: str
+    ) -> None:
+        """
+        Export domain-specific train, val, and test splits to separated CSV folders.
+        """
+        os.makedirs(output_dir, exist_ok=True)
         
-        self._log_split_statistics(train_df, val_df, test_df)
-        
-        return train_df, val_df, test_df
+        for domain, splits in domain_splits.items():
+            domain_dir = os.path.join(output_dir, domain.lower())
+            os.makedirs(domain_dir, exist_ok=True)
+            
+            splits['train'].to_csv(os.path.join(domain_dir, 'train.csv'), index=False)
+            splits['val'].to_csv(os.path.join(domain_dir, 'val.csv'), index=False)
+            splits['test'].to_csv(os.path.join(domain_dir, 'test.csv'), index=False)
+            
+        logger.info(f"Exported all isolated domain splits to {output_dir}")
     
-    def _log_split_statistics(
+    def load_domain_splits( #NEW
+        self,
+        splits_dir: str
+    ) -> Dict[str, Dict[str, pd.DataFrame]]:
+        """
+        Load previously exported domain-specific train, val, and test splits.
+        """
+        if not os.path.exists(splits_dir):
+            raise FileNotFoundError(f"Splits directory not found: {splits_dir}")
+            
+        logger.info(f"Loading existing domain splits from {splits_dir}")
+        domain_splits = {}
+        
+        # Iterate through each domain folder (e.g., 'politics', 'sport')
+        for domain_folder in os.listdir(splits_dir):
+            domain_path = os.path.join(splits_dir, domain_folder)
+            
+            if os.path.isdir(domain_path):
+                # Capitalize to match your original domain naming convention
+                domain_name = domain_folder.capitalize() 
+                domain_splits[domain_name] = {}
+                
+                # Load all three splits for this domain
+                for split_type in ['train', 'val', 'test']:
+                    file_path = os.path.join(domain_path, f"{split_type}.csv")
+                    if os.path.exists(file_path):
+                        domain_splits[domain_name][split_type] = pd.read_csv(file_path)
+                    else:
+                        logger.warning(f"Missing {split_type}.csv for domain {domain_name}")
+                
+                logger.info(f"  Loaded {domain_name} splits")
+                        
+        return domain_splits
+    
+    def _log_split_statistics( 
         self,
         train_df: pd.DataFrame,
         val_df: pd.DataFrame,
@@ -356,66 +397,6 @@ class DataManager:
             }
         
         return statistics
-    
-    def create_cross_domain_test_sets(
-        self,
-        test_df: pd.DataFrame
-    ) -> Dict[Tuple[str, str], pd.DataFrame]:
-        """
-        Create test sets for all source-target domain combinations.
-        Args:
-            test_df: Test DataFrame containing all domains
-        Returns:
-            Dictionary mapping (source_domain, target_domain) tuples to DataFrames
-        """
-        logger.info("Creating cross-domain test sets")
-        
-        cross_domain_sets = {}
-        
-        for source_domain in self.domains:
-            for target_domain in self.domains:
-                # For cross-domain evaluation, we use target domain data
-                # but track which source domain model will be tested
-                target_data = test_df[test_df['domain'] == target_domain].copy()
-                cross_domain_sets[(source_domain, target_domain)] = target_data
-                
-                logger.info(
-                    f"  Created test set for {source_domain} -> {target_domain}: "
-                    f"{len(target_data)} samples"
-                )
-        
-        return cross_domain_sets
-    
-    def export_splits(
-        self,
-        train_df: pd.DataFrame,
-        val_df: pd.DataFrame,
-        test_df: pd.DataFrame,
-        output_dir: str
-    ) -> None:
-        """
-        Export train, validation, and test splits to CSV files.
-        
-        Args:
-            train_df: Training DataFrame
-            val_df: Validation DataFrame
-            test_df: Test DataFrame
-            output_dir: Directory to save the CSV files
-        """
-        os.makedirs(output_dir, exist_ok=True)
-        
-        train_path = os.path.join(output_dir, 'train.csv')
-        val_path = os.path.join(output_dir, 'val.csv')
-        test_path = os.path.join(output_dir, 'test.csv')
-        
-        train_df.to_csv(train_path, index=False)
-        val_df.to_csv(val_path, index=False)
-        test_df.to_csv(test_path, index=False)
-        
-        logger.info(f"Exported splits to {output_dir}")
-        logger.info(f"  Train: {train_path}")
-        logger.info(f"  Validation: {val_path}")
-        logger.info(f"  Test: {test_path}")
     
     def get_summary(self) -> Dict:
         """
