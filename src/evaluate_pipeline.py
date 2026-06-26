@@ -22,7 +22,9 @@ Usage:
     !python evaluate_pipeline.py --model base --device cuda
 """
 
+import glob
 import os
+import re
 import sys
 import argparse
 import logging
@@ -127,16 +129,7 @@ class EvaluationPipeline:
         }
     
     def load_models(self, model_names: List[str]) -> Dict[str, Dict[str, ModelTrainer]]:
-        """
-        Load trained models from checkpoints.
-        
-        Args:
-            model_names: List of model variant names
-            
-        Returns:
-            Dictionary mapping model names to domain-trainer dictionaries
-        """
-        logger.info("\n[STEP 2] Loading Models")
+        logger.info("\n[STEP 2] Loading SPECIALIST Models")
         
         model_mapping = {
             'base': config.model.INDOBERT_BASE,
@@ -147,36 +140,38 @@ class EvaluationPipeline:
         all_models = {}
         
         for model_name in model_names:
-            if model_name not in model_mapping:
-                logger.warning(f"Invalid model name: {model_name}, skipping")
-                continue
-            
             full_model_name = model_mapping[model_name]
-            model_checkpoint_dir = os.path.join(self.checkpoint_dir, model_name)
-            checkpoint_path = os.path.join(model_checkpoint_dir, 'best_model.pt')
+            domain_trainers = {}
             
-            if not os.path.exists(checkpoint_path):
-                logger.warning(f"Checkpoint not found: {checkpoint_path}, skipping {model_name}")
-                continue
-            
-            logger.info(f"Loading {model_name} model from {checkpoint_path}")
-            
-            trainer = ModelTrainer(
-                model_name=full_model_name,
-                max_length=config.model.MAX_SEQUENCE_LENGTH,
-                device=self.device,
-                random_seed=self.random_seed
-            )
-            
-            trainer.load_checkpoint(checkpoint_path)
-            
-            domain_trainers = {
-                domain: trainer for domain in config.data.DOMAINS
-            }
+            # FIX: Loop through the 5 domains and load the SPECIFIC model for each
+            for domain in config.data.DOMAINS:
+                model_checkpoint_dir = os.path.join(self.checkpoint_dir, model_name, domain.capitalize())
+                checkpoint_files = glob.glob(os.path.join(model_checkpoint_dir, 'best_model_f1_*.pt'))
+                
+                if not checkpoint_files:
+                    logger.warning(f"No checkpoint found for {model_name} -> {domain}")
+                    continue
+                
+                def get_f1(path):
+                    m = re.search(r'best_model_f1_(\d+\.\d+)\.pt', os.path.basename(path))
+                    return float(m.group(1)) if m else 0
+
+                checkpoint_path = max(checkpoint_files, key=get_f1)
+                logger.info(f"Loading {domain} specialist from {checkpoint_path}")
+                
+                trainer = ModelTrainer(
+                    model_name=full_model_name,
+                    max_length=config.model.MAX_SEQUENCE_LENGTH,
+                    device=self.device,
+                    random_seed=self.random_seed
+                )
+                trainer.load_checkpoint(checkpoint_path)
+                
+                # Assign the specific specialist trainer to its specific domain key
+                domain_trainers[domain] = trainer
             
             all_models[model_name] = domain_trainers
         
-        logger.info(f"Loaded {len(all_models)} model(s)")
         return all_models
     
     def evaluate_single_model(
@@ -216,9 +211,23 @@ class EvaluationPipeline:
             test_data=test_data_by_domain,
             include_perturbations=not skip_perturbation
         )
-        
-        results_file = os.path.join(model_output_dir, 'complete_evaluation.json')
-        file_manager.save_json(results, results_file)
+        print(type(results['cross_domain']))
+        print(results['cross_domain'])
+
+        # # Convert cross-domain tuple keys
+        # if 'cross_domain' in results:
+        #     cross_domain_json = {}
+
+        #     for (source, target), result in results['cross_domain'].items():
+        #         if source not in cross_domain_json:
+        #             cross_domain_json[source] = {}
+
+        #         cross_domain_json[source][target] = result
+
+        #     results['cross_domain'] = cross_domain_json
+
+        # Capture the output of save_results into the results_file variable
+        results_file = eval_engine.save_results(results, filename='complete_evaluation.json')
         logger.info(f"Results saved to {results_file}")
         
         total_time = total_timer.stop()
@@ -231,15 +240,9 @@ class EvaluationPipeline:
         all_results: Dict[str, Dict[str, Any]]
     ) -> Dict[str, Any]:
         """
-        Perform statistical analysis across models.
-        
-        Args:
-            all_results: Dictionary mapping model names to their results
-            
-        Returns:
-            Dictionary with statistical analysis results
+        Perform statistical analysis using sample-level performance scores.
         """
-        logger.info("\n[STEP 4] Statistical Analysis")
+        logger.info("\n[STEP 4] Statistical Analysis (Sample-Level)")
         
         if len(all_results) < 2:
             logger.info("Skipping statistical analysis (need at least 2 models)")
@@ -248,38 +251,47 @@ class EvaluationPipeline:
         with Timer() as timer:
             analyzer = StatisticalAnalyzer()
             
-            model_f1_scores = {}
-            for model_name, results in all_results.items():
-                f1_scores = []
-                for domain, metrics in results['in_domain'].items():
-                    f1_scores.append(metrics['metrics']['f1'])
-                model_f1_scores[model_name] = f1_scores
+            # Use a dictionary to store arrays of scores for ALL samples
+            model_sample_scores = {}
             
-            model_names = list(model_f1_scores.keys())
+            for model_name, results in all_results.items():
+                all_model_scores = []
+                
+                # Iterate through every domain in this model
+                for domain, domain_results in results['in_domain'].items():
+                    # Extract raw probabilities: list of [prob_non_clickbait, prob_clickbait]
+                    probs = np.array(domain_results['probabilities'])
+                    
+                    # We take the probability of the positive class (clickbait)
+                    # This gives us N=75 (or more) data points per model instead of N=5
+                    clickbait_scores = probs[:, 1] 
+                    all_model_scores.extend(clickbait_scores.tolist())
+                
+                model_sample_scores[model_name] = np.array(all_model_scores)
+            
+            # Perform pairwise comparisons
+            model_names = list(model_sample_scores.keys())
             comparisons = {}
             
             for i in range(len(model_names)):
                 for j in range(i + 1, len(model_names)):
-                    model_a = model_names[i]
-                    model_b = model_names[j]
+                    model_a, model_b = model_names[i], model_names[j]
                     
-                    logger.info(f"Comparing {model_a} vs {model_b}")
+                    logger.info(f"Comparing {model_a} vs {model_b} (N={len(model_sample_scores[model_a])})")
                     
+                    # The StatisticalAnalyzer will now receive N ~ 375 scores
                     comparison = analyzer.analyze_model_comparison(
-                        model_a_scores=np.array(model_f1_scores[model_a]),
-                        model_b_scores=np.array(model_f1_scores[model_b]),
+                        model_a_scores=model_sample_scores[model_a],
+                        model_b_scores=model_sample_scores[model_b],
                         model_a_name=model_a,
                         model_b_name=model_b
                     )
-                    
                     comparisons[f"{model_a}_vs_{model_b}"] = comparison
-        
-        logger.info(f"Statistical analysis completed in {timer.elapsed():.2f}s")
         
         return {
             'status': 'completed',
             'comparisons': comparisons,
-            'model_f1_scores': model_f1_scores
+            'n_samples_per_model': len(model_sample_scores[model_names[0]])
         }
     
     def generate_summary(
@@ -313,12 +325,10 @@ class EvaluationPipeline:
             avg_in_domain_f1 = sum(in_domain_f1) / len(in_domain_f1) if in_domain_f1 else 0
             
             cross_domain_f1 = []
-            if 'cross_domain' in results and 'transfer_matrix' in results['cross_domain']:
-                for source in results['cross_domain']['transfer_matrix']:
-                    for target, metrics in results['cross_domain']['transfer_matrix'][source].items():
-                        if source != target:
-                            cross_domain_f1.append(metrics['metrics']['f1'])
-            
+            if 'cross_domain' in results:
+                for (source, target), metrics_data in results['cross_domain'].items():
+                    if source != target:
+                        cross_domain_f1.append(metrics_data['metrics']['f1'])            
             avg_cross_domain_f1 = sum(cross_domain_f1) / len(cross_domain_f1) if cross_domain_f1 else 0
             
             model_summary = {

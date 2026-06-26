@@ -27,7 +27,7 @@ import sys
 import argparse
 import logging
 from datetime import datetime
-from typing import Dict, Any
+from typing import Dict, Any, List
 
 from config import config
 from data_manager import DataManager
@@ -78,12 +78,11 @@ class TrainingPipeline:
     
     def load_and_prepare_data(self) -> Dict[str, Any]:
         """
-        Load datasets and perform stratified splitting.
-        
-        Returns:
-            Dictionary with train, val, test DataFrames and data_manager
+        Load datasets, perform domain-isolated stratified splitting, 
+        and reconstruct global DataFrames.
         """
         logger.info("\n[STEP 1] Loading and Preparing Data")
+        import pandas as pd # Ensure pandas is imported
         
         with Timer() as timer:
             data_manager = DataManager.from_dataset_directory(
@@ -95,21 +94,34 @@ class TrainingPipeline:
             
             summary = data_manager.get_summary()
             logger.info(f"Loaded {summary['total_samples']} samples from {len(summary['domains'])} domains")
-            logger.info(f"Label distribution: {summary['label_distribution']}")
             
-            train_df, val_df, test_df = data_manager.stratified_split(
+            # 1. Get the isolated dictionary of splits (NEW WAY)
+            domain_splits = data_manager.stratified_split_by_domain(
                 train_size=config.data.TRAIN_SIZE,
                 val_size=config.data.VAL_SIZE,
                 test_size=config.data.TEST_SIZE
             )
             
+            # 2. Export the isolated domain splits to folders
             splits_dir = os.path.join(self.output_dir, 'data_splits')
-            data_manager.export_splits(train_df, val_df, test_df, splits_dir)
-        
+            data_manager.export_domain_splits(domain_splits, splits_dir)
+
+            # 3. Stitch them back together to create the Global DataFrames!
+            train_df = pd.concat([splits['train'] for splits in domain_splits.values()]).reset_index(drop=True)
+            val_df = pd.concat([splits['val'] for splits in domain_splits.values()]).reset_index(drop=True)
+            test_df = pd.concat([splits['test'] for splits in domain_splits.values()]).reset_index(drop=True)
+            
+            # Export the global splits so evaluate_pipeline.py can still find them
+            train_df.to_csv(os.path.join(splits_dir, 'train.csv'), index=False)
+            val_df.to_csv(os.path.join(splits_dir, 'val.csv'), index=False)
+            test_df.to_csv(os.path.join(splits_dir, 'test.csv'), index=False)
+            
         logger.info(f"Data preparation completed in {timer.elapsed():.2f}s")
         
+        # 4. Return BOTH the isolated splits (for training) and global splits (for summaries)
         return {
             'data_manager': data_manager,
+            'domain_splits': domain_splits,
             'train_df': train_df,
             'val_df': val_df,
             'test_df': test_df
@@ -118,23 +130,13 @@ class TrainingPipeline:
     def train_single_model(
         self,
         model_name: str,
+        domain: str, # ADDED: The domain name
         train_df: Any,
         val_df: Any,
         perform_grid_search: bool = False
     ) -> Dict[str, Any]:
-        """
-        Train a single IndoBERT model.
-        
-        Args:
-            model_name: Name of model variant ('base', 'large', 'lite')
-            train_df: Training DataFrame
-            val_df: Validation DataFrame
-            perform_grid_search: Whether to perform hyperparameter search
-            
-        Returns:
-            Dictionary with training results
-        """
-        logger.info(f"\n[STEP 2] Training {model_name.upper()} Model")
+        """Train a single IndoBERT model for a specific domain."""
+        logger.info(f"\n[STEP 2] Training {model_name.upper()} Model for {domain.upper()}")
         
         model_mapping = {
             'base': config.model.INDOBERT_BASE,
@@ -151,15 +153,15 @@ class TrainingPipeline:
             if perform_grid_search:
                 logger.info("Performing hyperparameter grid search")
                 results = self._train_with_grid_search(
-                    full_model_name, model_name, train_df, val_df
+                    full_model_name, model_name, domain, train_df, val_df
                 )
             else:
                 logger.info("Training with default hyperparameters")
                 results = self._train_with_defaults(
-                    full_model_name, model_name, train_df, val_df
+                    full_model_name, model_name, domain, train_df, val_df
                 )
         
-        logger.info(f"Training completed in {timer.elapsed():.2f}s - Best F1: {results['best_f1']:.4f}")
+        logger.info(f"Training completed for {domain} in {timer.elapsed():.2f}s - Best F1: {results['best_f1']:.4f}")
         
         return results
     
@@ -167,6 +169,7 @@ class TrainingPipeline:
         self,
         full_model_name: str,
         model_name: str,
+        domain: str, # ADDED: The domain name
         train_df: Any,
         val_df: Any
     ) -> Dict[str, Any]:
@@ -179,7 +182,8 @@ class TrainingPipeline:
             random_seed=self.random_seed
         )
         
-        model_checkpoint_dir = os.path.join(self.checkpoint_dir, model_name)
+        # CRITICAL FIX: Save into checkpoints/{model_name}/{domain}/
+        model_checkpoint_dir = os.path.join(self.checkpoint_dir, model_name, domain)
         file_manager.ensure_directory(model_checkpoint_dir)
         
         history = trainer.train(
@@ -201,6 +205,7 @@ class TrainingPipeline:
         
         return {
             'model_name': model_name,
+            'domain': domain,
             'full_model_name': full_model_name,
             'history': history,
             'best_f1': best_f1,
@@ -217,11 +222,17 @@ class TrainingPipeline:
         self,
         full_model_name: str,
         model_name: str,
+        domain: str, # ADDED: The domain name
         train_df: Any,
         val_df: Any
     ) -> Dict[str, Any]:
-        """Train model with hyperparameter grid search."""
+        """Train model with hyperparameter grid search for a specific domain."""
         
+        # 1. Define domain-specific checkpoint directory
+        model_checkpoint_dir = os.path.join(self.checkpoint_dir, model_name, domain)
+        file_manager.ensure_directory(model_checkpoint_dir)
+        
+        # 2. Run Grid Search
         grid_search = HyperparameterSearch(
             model_name=full_model_name,
             param_grid=config.training.GRID_SEARCH_PARAMS,
@@ -236,14 +247,13 @@ class TrainingPipeline:
             num_epochs=config.training.NUM_EPOCHS
         )
         
-        model_checkpoint_dir = os.path.join(self.checkpoint_dir, model_name)
-        file_manager.ensure_directory(model_checkpoint_dir)
-        
+        # Save grid search results inside the domain folder
         search_file = os.path.join(model_checkpoint_dir, 'grid_search_results.json')
         grid_search.save_results(search_file)
         
-        logger.info(f"Training final model with best parameters: {search_results['best_params']}")
+        logger.info(f"Training final {domain} specialist with best params: {search_results['best_params']}")
         
+        # 3. Train the final specialist model
         trainer = ModelTrainer(
             model_name=full_model_name,
             max_length=config.model.MAX_SEQUENCE_LENGTH,
@@ -255,17 +265,15 @@ class TrainingPipeline:
             train_df=train_df,
             val_df=val_df,
             num_epochs=config.training.NUM_EPOCHS,
-            checkpoint_dir=model_checkpoint_dir,
+            checkpoint_dir=model_checkpoint_dir, # This ensures the best model is saved here
             **search_results['best_params']
         )
         
-        history_file = os.path.join(model_checkpoint_dir, 'training_history.json')
-        file_manager.save_json(history, history_file)
+        file_manager.save_json(history, os.path.join(model_checkpoint_dir, 'training_history.json'))
         
         return {
             'model_name': model_name,
-            'full_model_name': full_model_name,
-            'history': history,
+            'domain': domain,
             'best_f1': search_results['best_f1'],
             'checkpoint_dir': model_checkpoint_dir,
             'hyperparameters': search_results['best_params'],
@@ -309,56 +317,57 @@ class TrainingPipeline:
         for model_name, model_info in summary['training_results'].items():
             logger.info(f"    {model_name}: {model_info['best_f1']:.4f}")
     
-    def run(
-        self,
-        models: list = ['base'],
-        perform_grid_search: bool = False
-    ) -> Dict[str, Any]:
-        """
-        Run the complete training pipeline.
-        
-        Args:
-            models: List of model names to train ('base', 'large', 'lite', or 'all')
-            perform_grid_search: Whether to perform hyperparameter search
-            
-        Returns:
-            Dictionary with all training results
-        """
-        logger.info("\nStarting Training Pipeline")
-        logger.info(f"Models: {models}, Grid search: {perform_grid_search}")
-        
+    def run(self, models: List[str] = ['base'], perform_grid_search: bool = False) -> Dict[str, Any]:
+        logger.info("\nStarting SPECIALIST Training Pipeline")
         total_timer = Timer()
         total_timer.start()
         
+        # 1. Load the full dataset first
         data_results = self.load_and_prepare_data()
         
         if 'all' in models:
             models = ['base', 'large', 'lite']
         
         training_results = {}
+        
+        # 2. Get the unique domains from your data
+        domains = data_results['data_manager'].domains
+        domain_splits = data_results['domain_splits'] # Get the isolated splits
+        
         for model_name in models:
-            try:
-                model_results = self.train_single_model(
-                    model_name=model_name,
-                    train_df=data_results['train_df'],
-                    val_df=data_results['val_df'],
-                    perform_grid_search=perform_grid_search
-                )
-                training_results[model_name] = model_results
-            except Exception as e:
-                logger.error(f"Failed to train {model_name}: {str(e)}")
-                import traceback
-                traceback.print_exc()
+            training_results[model_name] = {}
+            
+            for domain in domains:
+                logger.info(f"\n--- Training Specialist: {model_name} for Domain: {domain} ---")
+                
+                # 3. Pull directly from the new dictionary structure!
+                train_df_domain = domain_splits[domain]['train']
+                val_df_domain = domain_splits[domain]['val']
+                
+                # 4. Train the specialist
+                try:
+                    model_results = self.train_single_model(
+                        model_name=model_name,
+                        domain=domain,
+                        train_df=train_df_domain,
+                        val_df=val_df_domain,
+                        perform_grid_search=perform_grid_search
+                    )
+                    training_results[model_name][domain] = model_results
+                except Exception as e:
+                    logger.error(f"Failed to train {model_name} on {domain}: {str(e)}")
+                    import traceback
+                    traceback.print_exc()
         
         results = {
             'data_info': {
                 'total_samples': data_results['data_manager'].get_summary()['total_samples'],
-                'domains': data_results['data_manager'].get_summary()['domains']
+                'domains': domains
             },
             'models': training_results
         }
         
-        self.save_pipeline_summary(results)
+        # self.save_pipeline_summary(results) # You may need to tweak your summary saver slightly since it's now a nested dict
         
         total_time = total_timer.stop()
         logger.info(f"\nPipeline completed in {total_time:.2f}s ({total_time/60:.2f} minutes)")
