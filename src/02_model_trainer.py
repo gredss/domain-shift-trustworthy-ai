@@ -13,10 +13,10 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from transformers import (
     AutoModel,
-    AutoTokenizer,
-    AdamW,
+    AutoTokenizer, 
     get_linear_schedule_with_warmup
 )
+from torch.optim import AdamW
 from typing import Dict, List, Tuple, Optional, Any
 import pandas as pd
 import numpy as np
@@ -172,8 +172,8 @@ class ModelTrainer:
         self.random_seed = random_seed
         
         # Set device
-        if device is None:
-            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        if device == "auto":
+            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         else:
             self.device = torch.device(device)
         
@@ -473,8 +473,8 @@ class ModelTrainer:
         
         # Training loop
         best_f1 = 0
-        patience_counter = 0
-        
+        patience_counter = 0 
+
         for epoch in range(1, num_epochs + 1):
             logger.info(f"Epoch {epoch}/{num_epochs}")
             
@@ -503,14 +503,16 @@ class ModelTrainer:
             })
             
             # Check for improvement
-            if val_metrics['f1'] > best_f1:
+            # We use >= 0 to ensure we at least save the first epoch's model
+            if val_metrics['f1'] >= best_f1: 
                 best_f1 = val_metrics['f1']
                 patience_counter = 0
                 
                 # Save best model
                 if checkpoint_dir:
+                    # We save even if F1 is 0.0, so you have at least one checkpoint
                     self.save_checkpoint(checkpoint_dir, f"best_model_f1_{best_f1:.4f}")
-                    logger.info(f"New best model saved with F1: {best_f1:.4f}")
+                    logger.info(f"Model saved with F1: {best_f1:.4f}")
             else:
                 patience_counter += 1
                 logger.info(f"No improvement. Patience: {patience_counter}/{early_stopping_patience}")
@@ -600,7 +602,7 @@ class ModelTrainer:
         if not os.path.exists(checkpoint_path):
             raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
         
-        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
         
         # Initialize model if not already done
         if self.model is None:
