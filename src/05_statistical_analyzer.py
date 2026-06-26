@@ -37,7 +37,7 @@ class BayesianTester:
         
         logger.info(f"BayesianTester initialized with ROPE threshold={rope_threshold}")
     
-    def bayesian_signed_rank_test(
+    def bayesian_signed_rank_test( #MARK
         self,
         scores_a: np.ndarray,
         scores_b: np.ndarray,
@@ -315,6 +315,9 @@ class ROPEAnalyzer:
         """
         se = std / np.sqrt(n)
         
+        if se == 0:
+            return 1.0 if abs(mean) <= rope else 0.0
+
         # Calculate z-scores for ROPE boundaries
         z_lower = (-rope - mean) / se
         z_upper = (rope - mean) / se
