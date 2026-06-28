@@ -175,6 +175,8 @@ class TrainingPipeline:
     ) -> Dict[str, Any]:
         """Train model with default hyperparameters."""
         
+        
+
         trainer = ModelTrainer(
             model_name=full_model_name,
             max_length=config.model.MAX_SEQUENCE_LENGTH,
@@ -231,7 +233,7 @@ class TrainingPipeline:
         # 1. Define domain-specific checkpoint directory
         model_checkpoint_dir = os.path.join(self.checkpoint_dir, model_name, domain)
         file_manager.ensure_directory(model_checkpoint_dir)
-        
+                
         # 2. Run Grid Search
         grid_search = HyperparameterSearch(
             model_name=full_model_name,
@@ -252,7 +254,8 @@ class TrainingPipeline:
         grid_search.save_results(search_file)
         
         logger.info(f"Training final {domain} specialist with best params: {search_results['best_params']}")
-        
+
+
         # 3. Train the final specialist model
         trainer = ModelTrainer(
             model_name=full_model_name,
