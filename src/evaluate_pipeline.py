@@ -102,30 +102,36 @@ class EvaluationPipeline:
             summary = data_manager.get_summary()
             logger.info(f"Loaded {summary['total_samples']} samples from {len(summary['domains'])} domains")
             
-            splits_dir = os.path.join('output', 'data_splits')
+            splits_dir = os.path.join(self.output_dir, "data_splits")
+
             if os.path.exists(splits_dir):
-                logger.info(f"Loading existing splits from {splits_dir}")
-                train_df = pd.read_csv(os.path.join(splits_dir, 'train.csv'))
-                val_df = pd.read_csv(os.path.join(splits_dir, 'val.csv'))
-                test_df = pd.read_csv(os.path.join(splits_dir, 'test.csv'))
+                logger.info(f"Loading existing domain splits from {splits_dir}")
+                domain_splits = data_manager.load_domain_splits(splits_dir)
             else:
-                logger.info("Creating new stratified splits")
-                train_df, val_df, test_df = data_manager.stratified_split(
+                logger.info("Creating new domain-specific splits")
+                domain_splits = data_manager.stratified_split_by_domain(
                     train_size=config.data.TRAIN_SIZE,
                     val_size=config.data.VAL_SIZE,
                     test_size=config.data.TEST_SIZE
                 )
-            
-            test_data_by_domain = data_manager.organize_by_domain(test_df)
-        
+
+                data_manager.export_domain_splits(
+                    domain_splits,
+                    splits_dir
+                )
+
+            # Evaluation only needs the test split of each domain
+            test_data_by_domain = {
+                domain: splits["test"]
+                for domain, splits in domain_splits.items()
+            }      
+
         logger.info(f"Data loading completed in {timer.elapsed():.2f}s")
         
         return {
-            'data_manager': data_manager,
-            'train_df': train_df,
-            'val_df': val_df,
-            'test_df': test_df,
-            'test_data_by_domain': test_data_by_domain
+            "data_manager": data_manager,
+            "domain_splits": domain_splits,
+            "test_data_by_domain": test_data_by_domain
         }
     
     def load_models(self, model_names: List[str]) -> Dict[str, Dict[str, ModelTrainer]]:
@@ -145,18 +151,21 @@ class EvaluationPipeline:
             
             # FIX: Loop through the 5 domains and load the SPECIFIC model for each
             for domain in config.data.DOMAINS:
-                model_checkpoint_dir = os.path.join(self.checkpoint_dir, model_name, domain.capitalize())
-                checkpoint_files = glob.glob(os.path.join(model_checkpoint_dir, 'best_model_f1_*.pt'))
-                
-                if not checkpoint_files:
+                model_checkpoint_dir = os.path.join(
+                    self.checkpoint_dir,
+                    model_name,
+                    domain.capitalize()
+                )
+
+                checkpoint_path = os.path.join(
+                    model_checkpoint_dir,
+                    "best_model.pt"
+                )
+
+                if not os.path.exists(checkpoint_path):
                     logger.warning(f"No checkpoint found for {model_name} -> {domain}")
                     continue
-                
-                def get_f1(path):
-                    m = re.search(r'best_model_f1_(\d+\.\d+)\.pt', os.path.basename(path))
-                    return float(m.group(1)) if m else 0
 
-                checkpoint_path = max(checkpoint_files, key=get_f1)
                 logger.info(f"Loading {domain} specialist from {checkpoint_path}")
                 
                 trainer = ModelTrainer(
@@ -211,8 +220,8 @@ class EvaluationPipeline:
             test_data=test_data_by_domain,
             include_perturbations=not skip_perturbation
         )
-        print(type(results['cross_domain']))
-        print(results['cross_domain'])
+        # print(type(results['cross_domain']))
+        # print(results['cross_domain'])
 
         # # Convert cross-domain tuple keys
         # if 'cross_domain' in results:
