@@ -472,7 +472,7 @@ class ModelTrainer:
         )
         
         # Training loop
-        best_f1 = 0
+        best_f1 = -1
         patience_counter = 0 
 
         for epoch in range(1, num_epochs + 1):
@@ -504,14 +504,14 @@ class ModelTrainer:
             
             # Check for improvement
             # We use >= 0 to ensure we at least save the first epoch's model
-            if val_metrics['f1'] >= best_f1: 
+            if val_metrics['f1'] > best_f1: 
                 best_f1 = val_metrics['f1']
                 patience_counter = 0
                 
                 # Save best model
                 if checkpoint_dir:
                     # We save even if F1 is 0.0, so you have at least one checkpoint
-                    self.save_checkpoint(checkpoint_dir, f"best_model_f1_{best_f1:.4f}")
+                    self.save_checkpoint(checkpoint_dir, f"best_model")
                     logger.info(f"Model saved with F1: {best_f1:.4f}")
             else:
                 patience_counter += 1
