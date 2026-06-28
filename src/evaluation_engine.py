@@ -524,8 +524,8 @@ class EvaluationEngine:
         results['cross_domain'] = self.cross_domain_evaluator.evaluate_all_combinations(test_data)
 
         first_key = next(iter(results['cross_domain']))
-        print("first key:", first_key)
-        print("type:", type(first_key))
+        # print("first key:", first_key)
+        # print("type:", type(first_key))
 
         # 2.1 Calculate Domain Shift (SD and TD)
         # 2.1 Calculate Domain Shift (SD and TD)
