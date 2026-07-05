@@ -286,39 +286,49 @@ class TrainingPipeline:
     def save_pipeline_summary(self, results: Dict[str, Any]) -> None:
         """
         Save pipeline execution summary.
-        
+
         Args:
             results: Dictionary with all training results
         """
         logger.info("\n[STEP 3] Saving Pipeline Summary")
-        
+
         summary = {
-            'timestamp': datetime.now().isoformat(),
-            'dataset_dir': self.dataset_dir,
-            'total_samples': results['data_info']['total_samples'],
-            'domains': results['data_info']['domains'],
-            'models_trained': list(results['models'].keys()),
-            'training_results': {}
+            "timestamp": datetime.now().isoformat(),
+            "dataset_dir": self.dataset_dir,
+            "total_samples": results["data_info"]["total_samples"],
+            "domains": results["data_info"]["domains"],
+            "models_trained": list(results["models"].keys()),
+            "training_results": {}
         }
-        
-        for model_name, model_results in results['models'].items():
-            summary['training_results'][model_name] = {
-                'best_f1': model_results['best_f1'],
-                'checkpoint_dir': model_results['checkpoint_dir'],
-                'hyperparameters': model_results['hyperparameters']
-            }
-        
-        summary_file = os.path.join(self.output_dir, 'training_summary.json')
+
+        # Save training results for every model and every domain
+        for model_name, domain_results in results["models"].items():
+
+            summary["training_results"][model_name] = {}
+
+            for domain_name, info in domain_results.items():
+
+                summary["training_results"][model_name][domain_name] = {
+                    "best_f1": info["best_f1"],
+                    "checkpoint_dir": info["checkpoint_dir"],
+                    "hyperparameters": info["hyperparameters"]
+                }
+
+        summary_file = os.path.join(self.output_dir, "training_summary.json")
         file_manager.save_json(summary, summary_file)
-        
+
         logger.info(f"Summary saved to {summary_file}")
-        logger.info(f"\nTraining Summary:")
+        logger.info("\nTraining Summary:")
         logger.info(f"  Total samples: {summary['total_samples']}")
         logger.info(f"  Domains: {', '.join(summary['domains'])}")
         logger.info(f"  Models trained: {', '.join(summary['models_trained'])}")
-        logger.info(f"  Best F1 Scores:")
-        for model_name, model_info in summary['training_results'].items():
-            logger.info(f"    {model_name}: {model_info['best_f1']:.4f}")
+        logger.info("  Best F1 Scores:")
+        for model_name, domain_results in summary["training_results"].items():
+            logger.info(f"    {model_name}:")
+            for domain_name, info in domain_results.items():
+                logger.info(
+                    f"      {domain_name}: {info['best_f1']:.4f}"
+                )    
     
     def run(self, models: List[str] = ['base'], perform_grid_search: bool = False) -> Dict[str, Any]:
         logger.info("\nStarting SPECIALIST Training Pipeline")
@@ -370,7 +380,7 @@ class TrainingPipeline:
             'models': training_results
         }
         
-        # self.save_pipeline_summary(results) # You may need to tweak your summary saver slightly since it's now a nested dict
+        self.save_pipeline_summary(results)
         
         total_time = total_timer.stop()
         logger.info(f"\nPipeline completed in {total_time:.2f}s ({total_time/60:.2f} minutes)")
