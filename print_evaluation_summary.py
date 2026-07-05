@@ -592,7 +592,6 @@ def _plot_perturbation_curves(perturbation: dict,
 
 def _plot_mean_perturbation(perturbation, in_domain,
                             output_dir: str = "."):
-    print("========== NEW PLOT VERSION ==========")
     levels = ["Clean","Low","Medium","High"]
 
     means = []
