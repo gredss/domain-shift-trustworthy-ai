@@ -296,21 +296,33 @@ class CrossDomainEvaluator:
     def evaluate_all_combinations(self, test_data: Dict[str, pd.DataFrame]) -> Dict[Tuple[str, str], Dict[str, Any]]:
         """
         Evaluate all source-target domain combinations (5x5 matrix).
-        
+
+        Source domains for which no specialist was loaded are skipped with a
+        warning instead of raising, so partial evaluation can complete for the
+        domains that did train successfully.
+
         Args:
             test_data: Dictionary mapping domain names to test DataFrames
-            
+
         Returns:
             Dictionary mapping (source, target) tuples to evaluation results
         """
         domains = list(test_data.keys())
         results = {}
         for source_domain in domains:
+            if source_domain not in self.model_trainers:
+                logger.warning(
+                    f"Skipping cross-domain evaluation for source '{source_domain}': "
+                    "no specialist model was loaded for this domain."
+                )
+                continue
             for target_domain in domains:
                 if target_domain in test_data:
                     # Keep as Tuple key for internal logic
                     key = (source_domain, target_domain)
-                    results[key] = self.evaluate_cross_domain(source_domain, target_domain, test_data[target_domain])
+                    results[key] = self.evaluate_cross_domain(
+                        source_domain, target_domain, test_data[target_domain]
+                    )
         return results
     
     def create_performance_matrix(

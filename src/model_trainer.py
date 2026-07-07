@@ -8,6 +8,8 @@ for IndoBERT variants (base, large, lite).
 
 import os
 import json
+import shutil
+import tempfile
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
@@ -556,19 +558,25 @@ class ModelTrainer:
         checkpoint_name: str = "checkpoint"
     ) -> str:
         """
-        Save model checkpoint.
-        
+        Save model checkpoint atomically.
+
+        Strategy: serialize to a local /tmp file first, then copy to the
+        final destination (which may be a remote/FUSE mount such as Google
+        Drive).  This guarantees that a failed write never destroys a
+        previously-good checkpoint, because the final path is only replaced
+        after the local write has fully succeeded.
+
         Args:
             checkpoint_dir: Directory to save checkpoint
             checkpoint_name: Name for the checkpoint
-            
+
         Returns:
             Path to saved checkpoint
         """
         os.makedirs(checkpoint_dir, exist_ok=True)
-        
-        checkpoint_path = os.path.join(checkpoint_dir, f"{checkpoint_name}.pt")
-        
+
+        final_path = os.path.join(checkpoint_dir, f"{checkpoint_name}.pt")
+
         checkpoint = {
             'model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict() if self.optimizer else None,
@@ -581,16 +589,42 @@ class ModelTrainer:
                 'random_seed': self.random_seed
             }
         }
-        
-        torch.save(checkpoint, checkpoint_path)
-        logger.info(f"Checkpoint saved to {checkpoint_path}")
-        
-        # Save training history as JSON
+
+        # Write to a guaranteed-local temp file, then copy to the final path.
+        # tempfile.gettempdir() returns /tmp on Linux/Colab — always local.
+        tmp_fd, tmp_path = tempfile.mkstemp(
+            dir=tempfile.gettempdir(), suffix=".pt"
+        )
+        os.close(tmp_fd)
+        try:
+            torch.save(checkpoint, tmp_path)
+            shutil.copy2(tmp_path, final_path)
+        finally:
+            # Always remove the temp file, even if copy fails.
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
+        # Integrity check: reload from the final path and verify key presence.
+        try:
+            probe = torch.load(final_path, map_location='cpu', weights_only=False)
+            if 'model_state_dict' not in probe:
+                raise ValueError("'model_state_dict' key missing from saved checkpoint")
+        except Exception as verify_err:
+            raise RuntimeError(
+                f"Checkpoint integrity check failed for {final_path}: {verify_err}"
+            ) from verify_err
+
+        logger.info(f"Checkpoint saved to {final_path}")
+
+        # Save training history as JSON (non-critical; errors are logged, not raised)
         history_path = os.path.join(checkpoint_dir, f"{checkpoint_name}_history.json")
-        with open(history_path, 'w') as f:
-            json.dump(self.training_history, f, indent=2)
-        
-        return checkpoint_path
+        try:
+            with open(history_path, 'w') as f:
+                json.dump(self.training_history, f, indent=2)
+        except Exception as hist_err:
+            logger.warning(f"Could not save training history JSON: {hist_err}")
+
+        return final_path
     
     def load_checkpoint(self, checkpoint_path: str) -> None:
         """

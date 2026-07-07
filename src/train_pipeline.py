@@ -342,21 +342,22 @@ class TrainingPipeline:
             models = ['base', 'large', 'lite']
         
         training_results = {}
-        
+
         # 2. Get the unique domains from your data
         domains = data_results['data_manager'].domains
-        domain_splits = data_results['domain_splits'] # Get the isolated splits
-        
+        domain_splits = data_results['domain_splits']  # isolated splits
+
         for model_name in models:
             training_results[model_name] = {}
-            
+            failed_domains = []  # collect per-domain failures; raise at end
+
             for domain in domains:
                 logger.info(f"\n--- Training Specialist: {model_name} for Domain: {domain} ---")
-                
+
                 # 3. Pull directly from the new dictionary structure!
                 train_df_domain = domain_splits[domain]['train']
                 val_df_domain = domain_splits[domain]['val']
-                
+
                 # 4. Train the specialist
                 try:
                     model_results = self.train_single_model(
@@ -371,6 +372,17 @@ class TrainingPipeline:
                     logger.error(f"Failed to train {model_name} on {domain}: {str(e)}")
                     import traceback
                     traceback.print_exc()
+                    failed_domains.append((domain, str(e)))
+
+            # Raise after the full model loop so all domains are attempted, but
+            # the pipeline does NOT silently continue to evaluation with gaps.
+            if failed_domains:
+                missing = ", ".join(d for d, _ in failed_domains)
+                raise RuntimeError(
+                    f"Training failed for {model_name} on domain(s): {missing}. "
+                    "Fix checkpoint save errors before running evaluate_pipeline.py. "
+                    f"Details: {failed_domains}"
+                )
         
         results = {
             'data_info': {
