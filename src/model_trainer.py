@@ -10,6 +10,7 @@ import os
 import json
 import shutil
 import tempfile
+import time
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
@@ -143,6 +144,55 @@ class IndoBERTClassifier(nn.Module):
         logits = self.classifier(pooled_output)
         
         return logits
+
+
+def _copy_to_drive(src: str, dst: str, retries: int = 5, base_delay: float = 3.0) -> None:
+    """
+    Copy a file from a local path to a (potentially FUSE-mounted) destination
+    such as Google Drive, with exponential back-off retries.
+
+    Google Drive FUSE (on Colab) intermittently rejects open(dst, 'wb') with
+    [Errno 95] Operation not supported, especially under write pressure.
+    Retrying with a short delay is sufficient in practice because the error is
+    transient — Drive re-accepts writes once its internal rate limiter resets.
+
+    A manual chunked write is used instead of shutil.copy2() because Drive FUSE
+    handles sequential chunk writes more reliably than a single large open().
+
+    Args:
+        src: Local source path (e.g. /tmp/tmpXXXX.pt)
+        dst: Destination path (may be on Google Drive FUSE)
+        retries: Maximum number of attempts (default 5)
+        base_delay: Initial back-off delay in seconds; doubles each retry
+    """
+    last_err: Exception = RuntimeError("No attempts made")
+    delay = base_delay
+    for attempt in range(1, retries + 1):
+        try:
+            # Chunked write: read 64 MB at a time to avoid large single writes
+            # that Drive FUSE handles poorly.
+            chunk_size = 64 * 1024 * 1024  # 64 MB
+            with open(src, 'rb') as fsrc, open(dst, 'wb') as fdst:
+                while True:
+                    buf = fsrc.read(chunk_size)
+                    if not buf:
+                        break
+                    fdst.write(buf)
+            # Preserve metadata (timestamps, permissions) like shutil.copy2
+            shutil.copystat(src, dst)
+            return  # success
+        except OSError as exc:
+            last_err = exc
+            logger.warning(
+                f"Drive copy attempt {attempt}/{retries} failed "
+                f"({exc}). Retrying in {delay:.0f}s…"
+            )
+            time.sleep(delay)
+            delay *= 2  # exponential back-off
+    raise RuntimeError(
+        f"Failed to copy checkpoint to {dst} after {retries} attempts. "
+        f"Last error: {last_err}"
+    ) from last_err
 
 
 class ModelTrainer:
@@ -590,15 +640,15 @@ class ModelTrainer:
             }
         }
 
-        # Write to a guaranteed-local temp file, then copy to the final path.
-        # tempfile.gettempdir() returns /tmp on Linux/Colab — always local.
+        # Write to a guaranteed-local temp file first.
+        # tempfile.gettempdir() returns /tmp on Linux/Colab — always local SSD.
         tmp_fd, tmp_path = tempfile.mkstemp(
             dir=tempfile.gettempdir(), suffix=".pt"
         )
         os.close(tmp_fd)
         try:
             torch.save(checkpoint, tmp_path)
-            shutil.copy2(tmp_path, final_path)
+            _copy_to_drive(tmp_path, final_path)
         finally:
             # Always remove the temp file, even if copy fails.
             if os.path.exists(tmp_path):

@@ -1403,6 +1403,175 @@ class TestSyntaxAllFiles(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# 11.  _copy_to_drive  (retry helper in model_trainer.py)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestCopyToDrive(unittest.TestCase):
+    """
+    Tests for the _copy_to_drive() helper that replaces shutil.copy2() for
+    writing checkpoints to Google Drive FUSE mounts.
+
+    No Google Drive, no GPU, no torch needed — only real local file I/O.
+    """
+
+    @staticmethod
+    def _get_fn():
+        """Import _copy_to_drive without triggering the torch mock side-effects."""
+        import importlib, sys
+        # model_trainer is already loaded (mocked torch) — grab the function directly
+        import model_trainer as mt
+        return mt._copy_to_drive
+
+    def _make_src(self, tmp, content=b"fake-checkpoint-data" * 1000):
+        p = os.path.join(tmp, "src.pt")
+        with open(p, "wb") as f:
+            f.write(content)
+        return p
+
+    # ------------------------------------------------------------------
+    # 1. Happy path: file is copied correctly on first attempt
+    # ------------------------------------------------------------------
+    def test_copy_succeeds_first_attempt(self):
+        fn = self._get_fn()
+        with tempfile.TemporaryDirectory() as tmp:
+            src = self._make_src(tmp)
+            dst = os.path.join(tmp, "dst.pt")
+            fn(src, dst)
+            with open(dst, "rb") as f:
+                self.assertEqual(f.read(), open(src, "rb").read())
+
+    # ------------------------------------------------------------------
+    # 2. Content is identical after copy (byte-for-byte)
+    # ------------------------------------------------------------------
+    def test_copy_content_identical(self):
+        fn = self._get_fn()
+        payload = bytes(range(256)) * 4096  # 1 MB of known bytes
+        with tempfile.TemporaryDirectory() as tmp:
+            src = self._make_src(tmp, payload)
+            dst = os.path.join(tmp, "dst.pt")
+            fn(src, dst)
+            with open(dst, "rb") as f:
+                self.assertEqual(f.read(), payload)
+
+    # ------------------------------------------------------------------
+    # 3. Retry: first N-1 attempts raise OSError, last attempt succeeds
+    # ------------------------------------------------------------------
+    def test_retry_succeeds_after_transient_failures(self):
+        fn = self._get_fn()
+        with tempfile.TemporaryDirectory() as tmp:
+            src = self._make_src(tmp)
+            dst = os.path.join(tmp, "dst.pt")
+
+            call_count = {"n": 0}
+            original_open = open
+
+            def flaky_open(path, mode="r", **kw):
+                if path == dst and "w" in mode:
+                    call_count["n"] += 1
+                    if call_count["n"] < 3:          # fail first 2 attempts
+                        raise OSError(95, "Operation not supported")
+                return original_open(path, mode, **kw)
+
+            with patch("builtins.open", side_effect=flaky_open), \
+                 patch("time.sleep"):                # skip actual waits
+                fn(src, dst, retries=5, base_delay=0.0)
+
+            self.assertEqual(call_count["n"], 3)    # failed twice, succeeded third
+
+    # ------------------------------------------------------------------
+    # 4. All retries exhausted → RuntimeError is raised
+    # ------------------------------------------------------------------
+    def test_raises_after_all_retries_exhausted(self):
+        fn = self._get_fn()
+        with tempfile.TemporaryDirectory() as tmp:
+            src = self._make_src(tmp)
+            dst = os.path.join(tmp, "dst.pt")
+
+            def always_fail(path, mode="r", **kw):
+                if "w" in mode:
+                    raise OSError(95, "Operation not supported")
+                return open.__wrapped__(path, mode, **kw) if hasattr(open, "__wrapped__") \
+                    else builtins_open(path, mode, **kw)
+
+            import builtins
+            builtins_open = builtins.open
+            with patch("builtins.open", side_effect=always_fail), \
+                 patch("time.sleep"):
+                with self.assertRaises(RuntimeError) as ctx:
+                    fn(src, dst, retries=3, base_delay=0.0)
+            self.assertIn("3 attempts", str(ctx.exception))
+
+    # ------------------------------------------------------------------
+    # 5. Back-off delays increase exponentially
+    # ------------------------------------------------------------------
+    def test_backoff_delays_are_exponential(self):
+        fn = self._get_fn()
+        with tempfile.TemporaryDirectory() as tmp:
+            src = self._make_src(tmp)
+            dst = os.path.join(tmp, "dst.pt")
+            sleep_calls = []
+
+            import builtins
+            builtins_open = builtins.open
+
+            def always_fail(path, mode="r", **kw):
+                if "w" in mode:
+                    raise OSError(95, "Operation not supported")
+                return builtins_open(path, mode, **kw)
+
+            # Patch time.sleep in the model_trainer module where it is used,
+            # and builtins.open to simulate Drive rejecting the write.
+            import model_trainer as mt
+            with patch("builtins.open", side_effect=always_fail), \
+                 patch.object(mt.time, "sleep",
+                              side_effect=lambda d: sleep_calls.append(d)):
+                with self.assertRaises(RuntimeError):
+                    fn(src, dst, retries=4, base_delay=2.0)
+
+        # 4 attempts → 4 sleeps (sleep is called after every failure including last)
+        # delays: 2, 4, 8, 16
+        self.assertEqual(len(sleep_calls), 4)
+        self.assertAlmostEqual(sleep_calls[0], 2.0)
+        self.assertAlmostEqual(sleep_calls[1], 4.0)
+        self.assertAlmostEqual(sleep_calls[2], 8.0)
+        self.assertAlmostEqual(sleep_calls[3], 16.0)
+
+    # ------------------------------------------------------------------
+    # 6. existing dst is protected when open(dst, 'wb') itself fails
+    #    (Drive FUSE rejects the open before any truncation occurs)
+    # ------------------------------------------------------------------
+    def test_existing_dst_not_corrupted_on_failure(self):
+        fn = self._get_fn()
+        good_data = b"good-checkpoint"
+        with tempfile.TemporaryDirectory() as tmp:
+            src = self._make_src(tmp)
+            dst = os.path.join(tmp, "dst.pt")
+            # Write a "good" checkpoint to dst first
+            with open(dst, "wb") as f:
+                f.write(good_data)
+
+            import builtins
+            builtins_open = builtins.open
+
+            def fail_before_open(path, mode="r", **kw):
+                # Simulate Drive FUSE: reject open() entirely before any
+                # truncation can happen — this is the errno 95 scenario.
+                if path == dst and "w" in mode:
+                    raise OSError(95, "Operation not supported")
+                return builtins_open(path, mode, **kw)
+
+            import model_trainer as mt
+            with patch("builtins.open", side_effect=fail_before_open), \
+                 patch.object(mt.time, "sleep"):
+                with self.assertRaises(RuntimeError):
+                    fn(src, dst, retries=2, base_delay=0.0)
+
+            # open(dst, 'wb') was rejected before truncation → good data intact
+            with builtins_open(dst, "rb") as f:
+                self.assertEqual(f.read(), good_data)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # RUNNER
 # ══════════════════════════════════════════════════════════════════════════════
 
