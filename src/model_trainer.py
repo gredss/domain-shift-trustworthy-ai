@@ -178,8 +178,22 @@ def _copy_to_drive(src: str, dst: str, retries: int = 5, base_delay: float = 3.0
                     if not buf:
                         break
                     fdst.write(buf)
+                # Force kernel write buffers → FUSE layer before close().
+                # Without this, Drive FUSE may report success but defer the
+                # actual upload, leaving the file empty on a re-mount.
+                fdst.flush()
+                os.fsync(fdst.fileno())
             # Preserve metadata (timestamps, permissions) like shutil.copy2
             shutil.copystat(src, dst)
+
+            # Verify: re-read the first 4 bytes to confirm Drive persisted the
+            # data (not just buffered it). A valid PyTorch zip starts with PK\x03\x04.
+            with open(dst, 'rb') as fcheck:
+                header = fcheck.read(4)
+            if len(header) < 4:
+                raise OSError(
+                    f"Verification failed: {dst} is only {len(header)} bytes after write"
+                )
             return  # success
         except OSError as exc:
             last_err = exc
