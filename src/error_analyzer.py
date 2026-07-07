@@ -601,9 +601,13 @@ def attach_texts_to_results(
         if df is not None:
             data["texts"] = df["text"].tolist()
 
-    # Cross-domain
+    # Cross-domain — keys may be tuples (source, target) in-memory or
+    # "source->target" strings after JSON round-trip; handle both.
     for key, data in results.get("cross_domain", {}).items():
-        _, tgt = (key.split("->") + ["?", "?"])[:2]
+        if isinstance(key, tuple):
+            tgt = key[1]
+        else:
+            _, tgt = (key.split("->") + ["?", "?"])[:2]
         df = test_data_by_domain.get(tgt)
         if df is not None:
             data["texts"] = df["text"].tolist()
