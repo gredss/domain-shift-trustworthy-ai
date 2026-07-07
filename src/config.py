@@ -540,57 +540,13 @@ class Config:
 config = Config()
 
 
-# Convenience functions for accessing configuration
 def get_config() -> Config:
-    """Get global configuration instance."""
+    """Return the global :class:`Config` singleton.
+
+    All subsections are accessible via ``config.<section>``, e.g.::
+
+        from config import config
+        config.model.DEFAULT_MODEL
+        config.training.LEARNING_RATE
+    """
     return config
-
-
-def get_model_config() -> ModelConfig:
-    """Get model configuration."""
-    return config.model
-
-
-def get_training_config() -> TrainingConfig:
-    """Get training configuration."""
-    return config.training
-
-
-def get_data_config() -> DataConfig:
-    """Get data configuration."""
-    return config.data
-
-
-def get_perturbation_config() -> PerturbationConfig:
-    """Get perturbation configuration."""
-    return config.perturbation
-
-
-def get_evaluation_config() -> EvaluationConfig:
-    """Get evaluation configuration."""
-    return config.evaluation
-
-
-def get_statistical_config() -> StatisticalConfig:
-    """Get statistical configuration."""
-    return config.statistical
-
-
-def get_path_config() -> PathConfig:
-    """Get path configuration."""
-    return config.paths
-
-
-def get_dashboard_config() -> DashboardConfig:
-    """Get dashboard configuration."""
-    return config.dashboard
-
-
-def get_logging_config() -> LoggingConfig:
-    """Get logging configuration."""
-    return config.logging
-
-
-def get_system_config() -> SystemConfig:
-    """Get system configuration."""
-    return config.system

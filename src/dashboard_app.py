@@ -20,6 +20,7 @@ from typing import Dict, List, Optional, Any, Tuple
 import logging
 
 # Import project modules
+from config import config as _app_config
 from model_trainer import ModelTrainer
 from perturbation_engine import PerturbationEngine
 from evaluation_engine import MetricsCalculator
@@ -30,24 +31,25 @@ logger = logging.getLogger(__name__)
 
 
 class DashboardConfig:
-    """Configuration for dashboard settings."""
-    
-    DOMAINS = ['Technology', 'Politics', 'Health', 'Sport', 'Education']
-    PERTURBATION_LEVELS = ['clean', 'low', 'medium', 'high']
-    MODEL_VARIANTS = ['indobert-base-p1', 'indobert-large-p1', 'indobert-lite-base-p1']
-    
-    # Color schemes
-    HEATMAP_COLORSCALE = 'RdYlGn'
-    DEGRADATION_COLORS = {
-        'clean': '#2ecc71',
-        'low': '#f39c12',
-        'medium': '#e67e22',
-        'high': '#e74c3c'
-    }
-    
-    # Thresholds
-    GOOD_PERFORMANCE_THRESHOLD = 0.80
-    ACCEPTABLE_PERFORMANCE_THRESHOLD = 0.70
+    """
+    Dashboard-level constants derived from the central :class:`config.Config`
+    singleton.  Read values from ``config.dashboard`` and ``config.data``
+    instead of duplicating them here, so there is a single source of truth.
+    """
+
+    DOMAINS: list = _app_config.data.DOMAINS
+    PERTURBATION_LEVELS: list = ['clean', 'low', 'medium', 'high']
+    MODEL_VARIANTS: list = [
+        'indobert-base-p1', 'indobert-large-p1', 'indobert-lite-base-p1'
+    ]
+
+    # Visualisation — delegate to config.dashboard
+    HEATMAP_COLORSCALE: str         = _app_config.dashboard.HEATMAP_COLORSCALE
+    DEGRADATION_COLORS: dict        = _app_config.dashboard.DEGRADATION_COLORS
+
+    # Performance thresholds — delegate to config.evaluation
+    GOOD_PERFORMANCE_THRESHOLD: float       = _app_config.evaluation.GOOD_PERFORMANCE_THRESHOLD
+    ACCEPTABLE_PERFORMANCE_THRESHOLD: float = _app_config.evaluation.ACCEPTABLE_PERFORMANCE_THRESHOLD
 
 
 class ModelCache:

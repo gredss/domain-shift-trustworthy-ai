@@ -453,23 +453,11 @@ class ErrorAnalyzer:
         Returns:
             Full path of the saved file
         """
+        from utils import make_json_serializable
         os.makedirs(output_dir, exist_ok=True)
         path = os.path.join(output_dir, "error_analysis.json")
-
-        # Convert any numpy types for JSON safety
-        def _serial(obj: Any) -> Any:
-            if isinstance(obj, (np.integer,)):     return int(obj)
-            if isinstance(obj, (np.floating,)):    return float(obj)
-            if isinstance(obj, np.ndarray):        return obj.tolist()
-            if isinstance(obj, dict):
-                return {k: _serial(v) for k, v in obj.items()}
-            if isinstance(obj, list):
-                return [_serial(i) for i in obj]
-            return obj
-
         with open(path, "w", encoding="utf-8") as f:
-            json.dump(_serial(report), f, ensure_ascii=False, indent=2)
-
+            json.dump(make_json_serializable(report), f, ensure_ascii=False, indent=2)
         logger.info(f"Error analysis saved to {path}")
         return path
 

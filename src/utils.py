@@ -854,11 +854,41 @@ def retry_on_failure(
     return wrapper
 
 
-# Convenience instances
+# Convenience instances used by train_pipeline.py and evaluate_pipeline.py
 file_manager = FileManager()
-logger_manager = LoggerManager()
 reproducibility = ReproducibilityHelper()
-data_validator = DataValidator()
-hash_helper = HashHelper()
-metrics_formatter = MetricsFormatter()
-config_validator = ConfigValidator()
+
+# ──────────────────────────────────────────────────────────────────────────────
+# JSON serialisation helper (shared across evaluation_engine and error_analyzer)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def make_json_serializable(obj: Any) -> Any:
+    """
+    Recursively convert an object to a JSON-serialisable form.
+
+    Handles:
+    - dict  : converts tuple keys ``(a, b)`` to ``"a->b"`` strings
+    - numpy : np.integer → int, np.floating → float, np.ndarray → list
+    - list / tuple : recurses element-wise
+
+    Args:
+        obj: Any Python object to serialise
+
+    Returns:
+        A JSON-safe equivalent of *obj*
+    """
+    if isinstance(obj, dict):
+        new_dict = {}
+        for k, v in obj.items():
+            key = f"{k[0]}->{k[1]}" if isinstance(k, tuple) else k
+            new_dict[key] = make_json_serializable(v)
+        return new_dict
+    if isinstance(obj, (np.integer,)):
+        return int(obj)
+    if isinstance(obj, (np.floating,)):
+        return float(obj)
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, (list, tuple)):
+        return [make_json_serializable(i) for i in obj]
+    return obj

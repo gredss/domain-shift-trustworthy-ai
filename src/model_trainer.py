@@ -10,12 +10,14 @@ import os
 import json
 import shutil
 import time
+import traceback
+from itertools import product
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from transformers import (
     AutoModel,
-    AutoTokenizer, 
+    AutoTokenizer,
     get_linear_schedule_with_warmup
 )
 from torch.optim import AdamW
@@ -205,21 +207,22 @@ class ModelTrainer:
     ):
         """
         Initialize the trainer.
-        
+
         Args:
             model_name: Name of the pretrained IndoBERT model
             num_labels: Number of output classes
             max_length: Maximum sequence length
-            device: Device to use ('cuda' or 'cpu'). Auto-detect if None
+            device: Device to use ('cuda', 'cpu', or 'auto').
+                    ``None`` and ``"auto"`` both trigger automatic detection.
             random_seed: Random seed for reproducibility
         """
         self.model_name = model_name
         self.num_labels = num_labels
         self.max_length = max_length
         self.random_seed = random_seed
-        
-        # Set device
-        if device == "auto":
+
+        # Set device — None and "auto" both mean auto-detect
+        if device is None or device == "auto":
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         else:
             self.device = torch.device(device)
@@ -365,20 +368,20 @@ class ModelTrainer:
         total_loss = 0
         correct_predictions = 0
         total_samples = 0
-        
+
+        loss_fn = nn.CrossEntropyLoss()
         progress_bar = tqdm(train_loader, desc=f"Epoch {epoch}")
-        
+
         for batch in progress_bar:
             # Move batch to device
             input_ids = batch['input_ids'].to(self.device)
             attention_mask = batch['attention_mask'].to(self.device)
             labels = batch['labels'].to(self.device)
-            
+
             # Forward pass
             logits = self.model(input_ids, attention_mask)
-            
+
             # Calculate loss
-            loss_fn = nn.CrossEntropyLoss()
             loss = loss_fn(logits, labels)
             
             # Backward pass
@@ -429,16 +432,15 @@ class ModelTrainer:
         total_loss = 0
         all_predictions = []
         all_labels = []
-        
+
+        loss_fn = nn.CrossEntropyLoss()
         with torch.no_grad():
             for batch in tqdm(val_loader, desc="Evaluating"):
                 input_ids = batch['input_ids'].to(self.device)
                 attention_mask = batch['attention_mask'].to(self.device)
                 labels = batch['labels'].to(self.device)
-                
+
                 logits = self.model(input_ids, attention_mask)
-                
-                loss_fn = nn.CrossEntropyLoss()
                 loss = loss_fn(logits, labels)
                 total_loss += loss.item()
                 
@@ -774,8 +776,6 @@ class HyperparameterSearch:
         Returns:
             Best hyperparameters and results
         """
-        from itertools import product
-        
         # Generate all combinations
         keys = list(self.param_grid.keys())
         values = list(self.param_grid.values())

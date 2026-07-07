@@ -28,6 +28,7 @@ import re
 import sys
 import argparse
 import logging
+import traceback
 from datetime import datetime
 from typing import Dict, Any, List
 import pandas as pd
@@ -144,6 +145,23 @@ class EvaluationPipeline:
         }
     
     def load_models(self, model_names: List[str]) -> Dict[str, Dict[str, ModelTrainer]]:
+        """
+        Load trained specialist checkpoints for each requested model variant.
+
+        For each model name (e.g. ``'base'``, ``'large'``, ``'lite'``) this
+        method iterates over all five domains and attempts to load the best
+        checkpoint saved by :class:`train_pipeline.TrainingPipeline`.  Domains
+        whose checkpoint file is missing are skipped with a warning so that a
+        partial evaluation can still proceed.
+
+        Args:
+            model_names: List of model variant names to load
+                         (subset of ``['base', 'large', 'lite']``).
+
+        Returns:
+            Nested dict ``{model_name: {domain: ModelTrainer}}`` containing
+            one :class:`ModelTrainer` per successfully loaded specialist.
+        """
         logger.info("\n[STEP 2] Loading SPECIALIST Models")
         
         model_mapping = {
@@ -457,7 +475,6 @@ class EvaluationPipeline:
                 all_results[model_name] = results
             except Exception as e:
                 logger.error(f"Failed to evaluate {model_name}: {str(e)}")
-                import traceback
                 traceback.print_exc()
         
         statistical_analysis = self.perform_statistical_analysis(all_results)
@@ -551,7 +568,6 @@ def main():
         sys.exit(1)
     except Exception as e:
         logger.error(f"\nEvaluation pipeline failed: {str(e)}")
-        import traceback
         traceback.print_exc()
         sys.exit(1)
 

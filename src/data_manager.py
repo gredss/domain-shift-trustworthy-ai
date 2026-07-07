@@ -43,9 +43,11 @@ class DataManager:
         self.tokenizer = None
         self.raw_data = None
         self.domains = []
-        
-        np.random.seed(random_seed)
+        # Use a per-instance RNG so constructing DataManager does not mutate
+        # the global numpy random state.
+        self._rng = np.random.default_rng(random_seed)
         logger.info(f"DataManager initialized with seed={random_seed}, max_length={max_length}")
+
     @classmethod
     def from_dataset_directory(
         cls,
@@ -284,25 +286,6 @@ class DataManager:
                 logger.info(f"  Loaded {domain_name} splits")
                         
         return domain_splits
-    
-    def _log_split_statistics( 
-        self,
-        train_df: pd.DataFrame,
-        val_df: pd.DataFrame,
-        test_df: pd.DataFrame
-    ) -> None:
-        """Log statistics about the data splits."""
-        logger.info("Split Statistics:")
-        logger.info(f"  Training set: {len(train_df)} samples")
-        logger.info(f"  Validation set: {len(val_df)} samples")
-        logger.info(f"  Test set: {len(test_df)} samples")
-        
-        for split_name, df in [("Train", train_df), ("Val", val_df), ("Test", test_df)]:
-            label_dist = df['label'].value_counts(normalize=True)
-            logger.info(f"  {split_name} label distribution: {label_dist.to_dict()}")
-            
-            domain_dist = df['domain'].value_counts()
-            logger.info(f"  {split_name} domain distribution: {domain_dist.to_dict()}")
     
     def initialize_tokenizer(self) -> None:
         """Initialize the tokenizer for text preprocessing."""

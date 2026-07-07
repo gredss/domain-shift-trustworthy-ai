@@ -26,8 +26,10 @@ import os
 import sys
 import argparse
 import logging
+import traceback
 from datetime import datetime
 from typing import Dict, Any, List
+import pandas as pd
 
 from config import config
 from data_manager import DataManager
@@ -82,7 +84,6 @@ class TrainingPipeline:
         and reconstruct global DataFrames.
         """
         logger.info("\n[STEP 1] Loading and Preparing Data")
-        import pandas as pd # Ensure pandas is imported
         
         with Timer() as timer:
             data_manager = DataManager.from_dataset_directory(
@@ -187,10 +188,15 @@ class TrainingPipeline:
             random_seed=self.random_seed
         )
 
-        # Local staging dir — fast SSD, no FUSE involved
-        local_checkpoint_dir = os.path.join(
-            "/content/checkpoints_staging", model_name, domain
+        # Local staging dir — fast local SSD, no FUSE/Drive involved.
+        # Falls back to a system temp directory when /content/ is not available
+        # (i.e. when running outside Google Colab).
+        _staging_root = (
+            "/content/checkpoints_staging"
+            if os.path.isdir("/content")
+            else os.path.join(os.path.dirname(self.checkpoint_dir), "checkpoints_staging")
         )
+        local_checkpoint_dir = os.path.join(_staging_root, model_name, domain)
         file_manager.ensure_directory(local_checkpoint_dir)
 
         # Final Drive destination (may be the same path when running locally)
@@ -250,10 +256,13 @@ class TrainingPipeline:
 
         Same local-staging → Drive-copy pattern as _train_with_defaults.
         """
-        # Local staging dir
-        local_checkpoint_dir = os.path.join(
-            "/content/checkpoints_staging", model_name, domain
+        # Local staging dir (same Colab-aware fallback as _train_with_defaults)
+        _staging_root = (
+            "/content/checkpoints_staging"
+            if os.path.isdir("/content")
+            else os.path.join(os.path.dirname(self.checkpoint_dir), "checkpoints_staging")
         )
+        local_checkpoint_dir = os.path.join(_staging_root, model_name, domain)
         file_manager.ensure_directory(local_checkpoint_dir)
 
         # Final Drive destination
@@ -402,7 +411,6 @@ class TrainingPipeline:
                     training_results[model_name][domain] = model_results
                 except Exception as e:
                     logger.error(f"Failed to train {model_name} on {domain}: {str(e)}")
-                    import traceback
                     traceback.print_exc()
                     failed_domains.append((domain, str(e)))
 
@@ -500,7 +508,6 @@ def main():
         sys.exit(1)
     except Exception as e:
         logger.error(f"\nTraining pipeline failed: {str(e)}")
-        import traceback
         traceback.print_exc()
         sys.exit(1)
 

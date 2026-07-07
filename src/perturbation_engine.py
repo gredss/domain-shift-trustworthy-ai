@@ -9,6 +9,7 @@ This module implements three levels of text perturbations for robustness testing
 
 import random
 import re
+from abc import ABC, abstractmethod
 from typing import List, Dict, Tuple, Optional
 import pandas as pd
 import numpy as np
@@ -37,7 +38,9 @@ class PerturbationEngine:
             random_seed: Base random seed for reproducibility
         """
         self.random_seed = random_seed
-        np.random.seed(random_seed)
+        # NOTE: We do NOT call np.random.seed() here to avoid mutating global
+        # NumPy state as a constructor side-effect. Each sub-engine uses its
+        # own private random.Random instance for full isolation.
 
         # Each class gets a distinct derived seed so their streams are
         # independent and do not interfere with each other.
@@ -145,7 +148,32 @@ class PerturbationEngine:
         }
 
 
-class LowLevelPerturbation:
+class BasePerturbation(ABC):
+    """
+    Abstract base class that defines the common interface for all perturbation
+    intensity levels. Subclasses must implement :meth:`perturb`.
+
+    This makes the Strategy pattern explicit: :class:`PerturbationEngine` holds
+    three concrete strategies (low / medium / high) that are interchangeable
+    at the ``perturb(text, intensity)`` boundary.
+    """
+
+    @abstractmethod
+    def perturb(self, text: str, intensity: Optional[float] = None) -> str:
+        """
+        Apply perturbations to *text*.
+
+        Args:
+            text:      Input string to perturb
+            intensity: Fraction of characters/words to affect.
+                       Uses a level-specific default when ``None``.
+
+        Returns:
+            Perturbed text string
+        """
+
+
+class LowLevelPerturbation(BasePerturbation):
     """
     Low-level perturbations: Character-level typos.
     Intensity: 5-10% of characters affected.
@@ -281,7 +309,7 @@ class LowLevelPerturbation:
         return char
 
 
-class MediumLevelPerturbation:
+class MediumLevelPerturbation(BasePerturbation):
     """
     Medium-level perturbations: Informal language injection.
     Intensity: 15-25% of words affected.
@@ -417,7 +445,7 @@ class MediumLevelPerturbation:
         return word
 
 
-class HighLevelPerturbation:
+class HighLevelPerturbation(BasePerturbation):
     """
     High-level perturbations: Synonym replacement and paraphrasing.
     Intensity: 40-60% of content altered.

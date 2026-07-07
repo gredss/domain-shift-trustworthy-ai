@@ -7,7 +7,6 @@ perturbation testing orchestration, and results aggregation for robustness analy
 
 import os
 import json
-#import torch
 import numpy as np
 import pandas as pd
 from typing import Dict, List, Tuple, Optional, Any
@@ -535,11 +534,6 @@ class EvaluationEngine:
         logger.info("Phase 2: Cross-domain evaluation")
         results['cross_domain'] = self.cross_domain_evaluator.evaluate_all_combinations(test_data)
 
-        first_key = next(iter(results['cross_domain']))
-        # print("first key:", first_key)
-        # print("type:", type(first_key))
-
-        # 2.1 Calculate Domain Shift (SD and TD)
         # 2.1 Calculate Domain Shift (SD and TD)
         logger.info("Phase 2.1: Calculating Domain Shift metrics...")
         in_domain_data = results['in_domain']
@@ -747,38 +741,21 @@ class EvaluationEngine:
         return df
     
     def save_results(self, results: Dict[str, Any], filename: str = 'evaluation_results.json') -> str:
+        """
+        Serialise evaluation results to JSON, converting tuple keys and numpy
+        types to JSON-safe equivalents.
+
+        Args:
+            results:  Results dict from run_complete_evaluation()
+            filename: Output filename (default: 'evaluation_results.json')
+
+        Returns:
+            Full path of the saved file
+        """
+        from utils import make_json_serializable
         output_path = os.path.join(self.output_dir, filename)
-
-        def make_serializable(obj):
-            # 1. Handle Dictionary Keys (The Tuple -> String fix)
-            if isinstance(obj, dict):
-                new_dict = {}
-                for k, v in obj.items():
-                    key = f"{k[0]}->{k[1]}" if isinstance(k, tuple) else k
-                    new_dict[key] = make_serializable(v)
-                return new_dict
-            
-            # 2. Handle Numpy Types (The main cause of your current crash)
-            elif isinstance(obj, (np.integer, np.int64)):
-                return int(obj)
-            elif isinstance(obj, (np.floating, np.float64)):
-                return float(obj)
-            elif isinstance(obj, np.ndarray):
-                return obj.tolist()
-            
-            # 3. Handle Lists/Tuples recursively
-            elif isinstance(obj, (list, tuple)):
-                return [make_serializable(i) for i in obj]
-            
-            return obj
-
-        # Process the results
-        serializable_results = make_serializable(results)
-
-        # Save
         with open(output_path, 'w') as f:
-            json.dump(serializable_results, f, indent=2)
-        
+            json.dump(make_json_serializable(results), f, indent=2)
         logger.info(f"Results saved to {output_path}")
         return output_path
     

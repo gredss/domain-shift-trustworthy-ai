@@ -33,8 +33,9 @@ class BayesianTester:
         """
         self.rope_threshold = rope_threshold
         self.random_seed = random_seed
-        np.random.seed(random_seed)
-        
+        # Use a per-instance RNG instead of mutating the global numpy seed.
+        self._rng = np.random.default_rng(random_seed)
+
         logger.info(f"BayesianTester initialized with ROPE threshold={rope_threshold}")
     
     def bayesian_signed_rank_test( #MARK
