@@ -770,35 +770,6 @@ class EvaluationEngine:
         logger.info(f"Results saved to {output_path}")
         return output_path
     
-    def _make_serializable(self, obj: Any) -> Any:
-        """
-        Convert numpy types to native Python types for JSON serialization.
-        
-        Args:
-            obj: Object to convert
-            
-        Returns:
-            Serializable object
-        """
-        if isinstance(obj, dict):
-            # If the key is a tuple, convert it to a string "source->target"
-            return {
-                (f"{k[0]}->{k[1]}" if isinstance(k, tuple) else k): self._make_serializable(v)
-                for k, v in obj.items()
-            }
-        elif isinstance(obj, np.integer):
-            return int(obj)
-        elif isinstance(obj, np.floating):
-            return float(obj)
-        elif isinstance(obj, np.ndarray):
-            return obj.tolist()
-        elif isinstance(obj, list):
-            return [self._make_serializable(item) for item in obj]
-        elif isinstance(obj, tuple):
-            return tuple(self._make_serializable(item) for item in obj)
-        else:
-            return obj
-    
     def generate_summary_report(
         self,
         results: Dict[str, Any]

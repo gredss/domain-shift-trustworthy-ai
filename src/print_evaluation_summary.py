@@ -6,9 +6,12 @@ Usage:
     Call print_full_evaluation_summary(results, model_name) after your evaluation pipeline,
     where `results` is the dict returned by EvaluationEngine (complete_evaluation.json).
 
+    Optionally also runs ErrorAnalyzer to explain WHY performance drops:
+        print_full_evaluation_summary(results, model_name, run_error_analysis=True)
+
 Expected keys in `results`:
     - in_domain:       {domain: {metrics: {accuracy, f1, precision, recall, mcc, roc_auc, confusion_matrix}}}
-    - cross_domain:    {(src, tgt): {metrics: {...}, domain_shift: {sd_f1, td_f1, ...}}}
+    - cross_domain:    {"Src->Tgt": {metrics: {...}, domain_shift: {sd_f1, td_f1, ...}}}
     - perturbation:    {domain: {clean: {metrics}, low: {metrics}, medium: {metrics}, high: {metrics}}}
 """
 
@@ -16,7 +19,6 @@ import json
 import numpy as np
 import os
 import argparse
-import ast
 from typing import Dict, Any
 import matplotlib.pyplot as plt
 
@@ -81,37 +83,20 @@ def _safe_get(d: dict, *keys, default=0.0):
 
 
 def load_results(results_dir: str) -> dict:
-    """Loads complete_evaluation.json and reconstructs tuple keys for cross_domain."""
+    """
+    Load complete_evaluation.json from results_dir.
+
+    cross_domain keys are stored as "Source->Target" strings by save_results()
+    in evaluation_engine.py.  All lookup functions in this module use that same
+    format, so no key transformation is needed here.
+    """
     file_path = os.path.join(results_dir, "complete_evaluation.json")
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"Could not find evaluation file at: {file_path}")
-    
+
     with open(file_path, "r", encoding="utf-8") as f:
         data = json.load(f)
-        
-    # Reconstruct tuple keys from JSON string keys for cross_domain
-    if "cross_domain" in data and isinstance(data["cross_domain"], dict):
-        new_cross_domain = {}
-        for k, v in data["cross_domain"].items():
-            try:
-                # Safely parse stringified tuples like "('Education', 'Health')"
-                parsed_key = ast.literal_eval(k)
-                if isinstance(parsed_key, (tuple, list)) and len(parsed_key) == 2:
-                    new_cross_domain[tuple(parsed_key)] = v
-                else:
-                    new_cross_domain[k] = v
-            except (ValueError, SyntaxError):
-                # Fallback for plain comma-separated strings like "Education,Health"
-                if "," in k:
-                    parts = tuple(x.strip() for x in k.split(","))
-                    if len(parts) == 2:
-                        new_cross_domain[parts] = v
-                    else:
-                        new_cross_domain[k] = v
-                else:
-                    new_cross_domain[k] = v
-        data["cross_domain"] = new_cross_domain
-        
+
     return data
 
 
@@ -597,24 +582,23 @@ def _plot_mean_perturbation(perturbation, in_domain,
     means = []
     x_base = np.array([0, 1, 2, 3])
 
-    plt.figure(figsize=(10, 6)) 
+    plt.figure(figsize=(10, 6))
 
-    for lvl in ["clean","low","medium","high"]:
+    for lvl in ["clean", "low", "medium", "high"]:
 
         vals = []
 
         for dom in DOMAINS:
-
-            if lvl=="clean":
-                vals.append(
-                    _v(in_domain[dom]["metrics"]["f1"])
-                )
+            if lvl == "clean":
+                f1 = _v(in_domain.get(dom, {}).get("metrics", {}).get("f1", 0))
             else:
-                vals.append(
-                    _v(
-                        perturbation[dom][lvl]["metrics"]["f1"]
-                    )
+                f1 = _v(
+                    perturbation.get(dom, {})
+                    .get(lvl, {})
+                    .get("metrics", {})
+                    .get("f1", 0)
                 )
+            vals.append(f1)
 
         means.append(np.mean(vals))
 
@@ -657,8 +641,24 @@ def _plot_mean_perturbation(perturbation, in_domain,
 # MAIN ENTRY POINT
 # ──────────────────────────────────────────────────────────────────────────────
 
-def print_full_evaluation_summary(results: dict, model_name: str = "BASE") -> None:
-    """Print a complete, formatted evaluation summary to stdout."""
+def print_full_evaluation_summary(
+    results: dict,
+    model_name: str = "BASE",
+    run_error_analysis: bool = True,
+    output_dir: str = "."
+) -> None:
+    """
+    Print a complete, formatted evaluation summary to stdout.
+
+    Args:
+        results:            Output of EvaluationEngine.run_complete_evaluation()
+        model_name:         Label for all section headers
+        run_error_analysis: When True, also run ErrorAnalyzer and print its
+                            report explaining WHY performance drops
+        output_dir:         Directory where plot PNGs are saved.
+                            Defaults to '.' (cwd). Pass --results-dir here
+                            when running via CLI so plots land next to the JSON.
+    """
     in_domain    = results.get("in_domain", {})
     cross_domain = results.get("cross_domain", {})
     perturbation = results.get("perturbation", {})
@@ -676,18 +676,23 @@ def print_full_evaluation_summary(results: dict, model_name: str = "BASE") -> No
     _print_domain_shift(cross_domain, in_domain)
     _print_cross_domain_full(cross_domain)
     _print_perturbation(perturbation, in_domain)
-    _plot_perturbation_curves(
-        perturbation,
-        in_domain
-    )
-    _plot_mean_perturbation(
-        perturbation,
-        in_domain
-    )
+    _plot_perturbation_curves(perturbation, in_domain, output_dir=output_dir)
+    _plot_mean_perturbation(perturbation, in_domain, output_dir=output_dir)
     _print_confusion_matrices(in_domain, cross_domain)
     _print_class_imbalance(in_domain)
     _print_global_summary(in_domain, cross_domain, perturbation, model_name)
-    # print(results["cross_domain"].keys())
+
+    # Optional: WHY analysis
+    if run_error_analysis:
+        try:
+            from error_analyzer import ErrorAnalyzer
+            analyzer = ErrorAnalyzer()
+            ea_report = analyzer.analyze(results, model_name=model_name)
+            analyzer.print_report(ea_report)
+        except ImportError:
+            print("\n[WARN] error_analyzer.py not found — skipping error analysis.")
+        except Exception as e:
+            print(f"\n[WARN] Error analysis failed: {e}")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -717,8 +722,14 @@ if __name__ == "__main__":
 
     parser.add_argument(
         "--file",
-        default="evaluation_results.json",
-        help="Evaluation result JSON filename."
+        default="complete_evaluation.json",
+        help="Evaluation result JSON filename (default: complete_evaluation.json)."
+    )
+
+    parser.add_argument(
+        "--no-error-analysis",
+        action="store_true",
+        help="Skip the ErrorAnalyzer section."
     )
 
     args = parser.parse_args()
@@ -737,5 +748,7 @@ if __name__ == "__main__":
 
     print_full_evaluation_summary(
         results,
-        model_name=args.model.upper()
+        model_name=args.model.upper(),
+        run_error_analysis=not args.no_error_analysis,
+        output_dir=args.results_dir      # plots saved alongside the JSON
     )

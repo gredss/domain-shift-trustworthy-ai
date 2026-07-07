@@ -26,19 +26,25 @@ class PerturbationEngine:
     def __init__(self, random_seed: int = 42):
         """
         Initialize the perturbation engine.
-        
+
+        Each sub-class receives a *different* derived seed so that they use
+        independent random streams. This avoids the earlier bug where each
+        class reset the global random.seed(), meaning Low and Medium
+        perturbations were not truly reproducible because their seeds were
+        immediately overwritten by the next class's __init__.
+
         Args:
-            random_seed: Random seed for reproducibility
+            random_seed: Base random seed for reproducibility
         """
         self.random_seed = random_seed
-        random.seed(random_seed)
         np.random.seed(random_seed)
-        
-        # Initialize perturbation handlers
-        self.low_level = LowLevelPerturbation(random_seed)
-        self.medium_level = MediumLevelPerturbation(random_seed)
-        self.high_level = HighLevelPerturbation(random_seed)
-        
+
+        # Each class gets a distinct derived seed so their streams are
+        # independent and do not interfere with each other.
+        self.low_level    = LowLevelPerturbation(random_seed)
+        self.medium_level = MediumLevelPerturbation(random_seed + 1)
+        self.high_level   = HighLevelPerturbation(random_seed + 2)
+
         logger.info(f"PerturbationEngine initialized with seed={random_seed}")
     
     def apply_perturbation(
@@ -148,13 +154,16 @@ class LowLevelPerturbation:
     def __init__(self, random_seed: int = 42):
         """
         Initialize low-level perturbation handler.
-        
+
+        Uses a private random.Random instance so this class's state is
+        fully isolated from the global random module and from other classes.
+
         Args:
             random_seed: Random seed for reproducibility
         """
         self.random_seed = random_seed
-        random.seed(random_seed)
-        
+        self._rng = random.Random(random_seed)
+
         # Indonesian keyboard layout for realistic typos
         self.keyboard_neighbors = {
             'a': ['s', 'q', 'w', 'z'],
@@ -203,57 +212,72 @@ class LowLevelPerturbation:
         
         # Default intensity: 5-10%
         if intensity is None:
-            intensity = random.uniform(0.05, 0.10)
-        
+            intensity = self._rng.uniform(0.05, 0.10)
+
         chars = list(text)
         num_perturbations = max(1, int(len(chars) * intensity))
-        
+
         # Get indices of alphabetic characters only
         alpha_indices = [i for i, c in enumerate(chars) if c.isalpha()]
-        
+
         if not alpha_indices:
             return text
-        
+
         # Randomly select characters to perturb
         num_perturbations = min(num_perturbations, len(alpha_indices))
-        perturb_indices = random.sample(alpha_indices, num_perturbations)
-        
+        perturb_indices = self._rng.sample(alpha_indices, num_perturbations)
+
+        # 'swap' operates at word level: collect swaps, apply after char loop
+        swap_positions: List[int] = []
         for idx in perturb_indices:
-            chars[idx] = self._apply_typo(chars[idx])
-        
+            result = self._apply_typo(chars, idx)
+            if result is None:
+                # 'swap' requested — defer to word-level swap below
+                swap_positions.append(idx)
+            else:
+                chars[idx] = result
+
+        # Word-level adjacent-character swap for the deferred positions
+        for idx in swap_positions:
+            if idx + 1 < len(chars):
+                chars[idx], chars[idx + 1] = chars[idx + 1], chars[idx]
+
         return ''.join(chars)
-    
-    def _apply_typo(self, char: str) -> str:
+
+    def _apply_typo(self, chars: List[str], idx: int):
         """
-        Apply a random typo to a character.
-        
+        Apply a random typo at position *idx* of the character list.
+
+        Returns the replacement string, or None to signal a word-level swap
+        (caller handles the swap to avoid indexing complexity inside here).
+
         Args:
-            char: Character to perturb
-            
+            chars: Full character list of the text being perturbed
+            idx:   Index of the character to modify
+
         Returns:
-            Perturbed character
+            str  — replacement character(s), or '' for deletion
+            None — caller should perform adjacent-character swap at idx
         """
+        char = chars[idx]
         char_lower = char.lower()
-        typo_type = random.choice(['substitute', 'delete', 'insert', 'swap'])
-        
+        typo_type = self._rng.choice(['substitute', 'delete', 'insert', 'swap'])
+
         if typo_type == 'substitute' and char_lower in self.keyboard_neighbors:
-            # Substitute with keyboard neighbor
-            new_char = random.choice(self.keyboard_neighbors[char_lower])
+            new_char = self._rng.choice(self.keyboard_neighbors[char_lower])
             return new_char.upper() if char.isupper() else new_char
-        
+
         elif typo_type == 'delete':
-            # Delete character (return empty string)
             return ''
-        
+
         elif typo_type == 'insert' and char_lower in self.keyboard_neighbors:
-            # Insert a neighbor character
-            insert_char = random.choice(self.keyboard_neighbors[char_lower])
+            insert_char = self._rng.choice(self.keyboard_neighbors[char_lower])
             return char + insert_char
-        
+
         elif typo_type == 'swap':
-            # This will be handled at word level, return original
-            return char
-        
+            # Signal the caller to do a word-level adjacent swap
+            return None
+
         return char
 
 
@@ -266,13 +290,16 @@ class MediumLevelPerturbation:
     def __init__(self, random_seed: int = 42):
         """
         Initialize medium-level perturbation handler.
-        
+
+        Uses a private random.Random instance so this class's state is
+        fully isolated from the global random module and from other classes.
+
         Args:
             random_seed: Random seed for reproducibility
         """
         self.random_seed = random_seed
-        random.seed(random_seed)
-        
+        self._rng = random.Random(random_seed)
+
         # Indonesian informal language mappings
         self.formal_to_informal = {
             'tidak': ['gak', 'nggak', 'ga', 'ngga'],
@@ -342,13 +369,13 @@ class MediumLevelPerturbation:
         
         # Default intensity: 15-25%
         if intensity is None:
-            intensity = random.uniform(0.15, 0.25)
-        
+            intensity = self._rng.uniform(0.15, 0.25)
+
         words = text.split()
         num_perturbations = max(1, int(len(words) * intensity))
-        
+
         # Randomly select words to perturb
-        perturb_indices = random.sample(range(len(words)), min(num_perturbations, len(words)))
+        perturb_indices = self._rng.sample(range(len(words)), min(num_perturbations, len(words)))
         
         for idx in perturb_indices:
             words[idx] = self._informalize_word(words[idx])
@@ -372,19 +399,19 @@ class MediumLevelPerturbation:
         
         # Try formal to informal mapping
         if word_clean in self.formal_to_informal:
-            informal = random.choice(self.formal_to_informal[word_clean])
+            informal = self._rng.choice(self.formal_to_informal[word_clean])
             # Preserve original punctuation
             if word != word_lower:
                 return word.replace(word_clean, informal)
             return informal
-        
+
         # Try abbreviation
-        if word_clean in self.abbreviations and random.random() < 0.5:
+        if word_clean in self.abbreviations and self._rng.random() < 0.5:
             return self.abbreviations[word_clean]
-        
+
         # Add slang particle
-        if len(word_clean) > 3 and random.random() < 0.3:
-            particle = random.choice(self.slang_additions)
+        if len(word_clean) > 3 and self._rng.random() < 0.3:
+            particle = self._rng.choice(self.slang_additions)
             return f"{word} {particle}"
         
         return word
@@ -399,12 +426,15 @@ class HighLevelPerturbation:
     def __init__(self, random_seed: int = 42):
         """
         Initialize high-level perturbation handler.
-        
+
+        Uses a private random.Random instance so this class's state is
+        fully isolated from the global random module and from other classes.
+
         Args:
             random_seed: Random seed for reproducibility
         """
         self.random_seed = random_seed
-        random.seed(random_seed)
+        self._rng = random.Random(random_seed)
         
         # Indonesian synonym dictionary
         self.synonyms = {
@@ -471,13 +501,13 @@ class HighLevelPerturbation:
         
         # Default intensity: 40-60%
         if intensity is None:
-            intensity = random.uniform(0.40, 0.60)
-        
+            intensity = self._rng.uniform(0.40, 0.60)
+
         # Apply synonym replacement
         text = self._replace_synonyms(text, intensity)
-        
+
         # Apply sentence structure modification (with lower probability)
-        if random.random() < 0.3:
+        if self._rng.random() < 0.3:
             text = self._modify_structure(text)
         
         return text
@@ -505,20 +535,20 @@ class HighLevelPerturbation:
         
         if not replaceable_indices:
             return text
-        
+
         # Randomly select words to replace
         num_replacements = min(num_replacements, len(replaceable_indices))
-        replace_indices = random.sample(replaceable_indices, num_replacements)
-        
+        replace_indices = self._rng.sample(replaceable_indices, num_replacements)
+
         for idx in replace_indices:
             word = words[idx]
             word_clean = re.sub(r'[^\w\s]', '', word.lower())
-            
+
             if word_clean in self.synonyms:
                 # Get synonym (excluding the original word)
                 synonym_options = [s for s in self.synonyms[word_clean] if s != word_clean]
                 if synonym_options:
-                    synonym = random.choice(synonym_options)
+                    synonym = self._rng.choice(synonym_options)
                     
                     # Preserve capitalization
                     if word[0].isupper():
@@ -546,11 +576,11 @@ class HighLevelPerturbation:
         
         if len(sentences) < 2:
             return text
-        
+
         # Randomly reorder some clauses or sentences
-        if random.random() < 0.5 and len(sentences) >= 2:
+        if self._rng.random() < 0.5 and len(sentences) >= 2:
             # Swap two adjacent sentences
-            idx = random.randint(0, len(sentences) - 2)
+            idx = self._rng.randint(0, len(sentences) - 2)
             sentences[idx], sentences[idx + 1] = sentences[idx + 1], sentences[idx]
         
         # Reconstruct text

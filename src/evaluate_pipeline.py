@@ -39,6 +39,7 @@ from model_trainer import ModelTrainer
 from evaluation_engine import EvaluationEngine
 from perturbation_engine import PerturbationEngine
 from statistical_analyzer import StatisticalAnalyzer
+from error_analyzer import ErrorAnalyzer, attach_texts_to_results
 from utils import file_manager, reproducibility, Timer, get_timestamp
 
 logging.basicConfig(
@@ -56,6 +57,7 @@ class EvaluationPipeline:
         checkpoint_dir: str = "checkpoints",
         dataset_dir: str = "dataset",
         output_dir: str = "evaluation_results",
+        train_output_dir: str = "output",
         device: str = "auto",
         random_seed: int = 42
     ):
@@ -66,12 +68,14 @@ class EvaluationPipeline:
             checkpoint_dir: Directory containing trained model checkpoints
             dataset_dir: Directory containing CSV files
             output_dir: Directory for evaluation results
+            train_output_dir: Directory used by train_pipeline.py (where data_splits/ were saved)
             device: Device to use ('cuda', 'cpu', or 'auto')
             random_seed: Random seed for reproducibility
         """
         self.checkpoint_dir = checkpoint_dir
         self.dataset_dir = dataset_dir
         self.output_dir = output_dir
+        self.train_output_dir = train_output_dir
         self.device = device
         self.random_seed = random_seed
         
@@ -85,6 +89,10 @@ class EvaluationPipeline:
     def load_data(self) -> Dict[str, Any]:
         """
         Load datasets and organize by domain.
+
+        Splits are loaded from train_output_dir/data_splits/ (written by train_pipeline.py)
+        so that evaluation uses the exact same test split the model never saw during training.
+        If that directory does not exist, splits are recreated and saved there.
         
         Returns:
             Dictionary with data_manager and domain-organized test data
@@ -102,23 +110,24 @@ class EvaluationPipeline:
             summary = data_manager.get_summary()
             logger.info(f"Loaded {summary['total_samples']} samples from {len(summary['domains'])} domains")
             
-            splits_dir = os.path.join(self.output_dir, "data_splits")
+            # Always look in the training output dir first so we reuse the same
+            # test split that was held out during train_pipeline.py.
+            splits_dir = os.path.join(self.train_output_dir, "data_splits")
 
             if os.path.exists(splits_dir):
                 logger.info(f"Loading existing domain splits from {splits_dir}")
                 domain_splits = data_manager.load_domain_splits(splits_dir)
             else:
-                logger.info("Creating new domain-specific splits")
+                logger.warning(
+                    f"No pre-saved splits found at {splits_dir}. "
+                    "Recreating splits — make sure this matches the training seed."
+                )
                 domain_splits = data_manager.stratified_split_by_domain(
                     train_size=config.data.TRAIN_SIZE,
                     val_size=config.data.VAL_SIZE,
                     test_size=config.data.TEST_SIZE
                 )
-
-                data_manager.export_domain_splits(
-                    domain_splits,
-                    splits_dir
-                )
+                data_manager.export_domain_splits(domain_splits, splits_dir)
 
             # Evaluation only needs the test split of each domain
             test_data_by_domain = {
@@ -220,28 +229,27 @@ class EvaluationPipeline:
             test_data=test_data_by_domain,
             include_perturbations=not skip_perturbation
         )
-        # print(type(results['cross_domain']))
-        # print(results['cross_domain'])
 
-        # # Convert cross-domain tuple keys
-        # if 'cross_domain' in results:
-        #     cross_domain_json = {}
-
-        #     for (source, target), result in results['cross_domain'].items():
-        #         if source not in cross_domain_json:
-        #             cross_domain_json[source] = {}
-
-        #         cross_domain_json[source][target] = result
-
-        #     results['cross_domain'] = cross_domain_json
+        # Inject raw texts into results so ErrorAnalyzer can access headlines
+        results = attach_texts_to_results(results, test_data_by_domain)
 
         # Capture the output of save_results into the results_file variable
         results_file = eval_engine.save_results(results, filename='complete_evaluation.json')
         logger.info(f"Results saved to {results_file}")
-        
+
+        # Run error analysis — explains WHY performance drops per condition
+        logger.info(f"\n[STEP 3b] Error Analysis for {model_name.upper()}")
+        try:
+            error_analyzer = ErrorAnalyzer()
+            error_report = error_analyzer.analyze(results, model_name=model_name)
+            error_analyzer.save_report(error_report, output_dir=model_output_dir)
+            error_analyzer.print_report(error_report)
+        except Exception as e:
+            logger.warning(f"Error analysis failed (non-fatal): {e}")
+
         total_time = total_timer.stop()
         logger.info(f"Evaluation completed in {total_time:.2f}s ({total_time/60:.2f} minutes)")
-        
+
         return results
     
     def perform_statistical_analysis(
@@ -249,58 +257,90 @@ class EvaluationPipeline:
         all_results: Dict[str, Dict[str, Any]]
     ) -> Dict[str, Any]:
         """
-        Perform statistical analysis using sample-level performance scores.
+        Perform statistical analysis comparing model variants using F1-score
+        sequences drawn from every (domain × perturbation_level) condition.
+
+        Each observation is the F1-score of one experimental condition, which is
+        the correct unit for a Bayesian signed-rank / paired-test comparison —
+        not raw prediction probabilities, which would conflate calibration with
+        discriminative performance and make the statistical conclusion meaningless.
+
+        Score vector construction per model (up to 5 domains × 4 conditions = 20 points):
+          - in-domain clean           : 5 F1 scores  (one per domain)
+          - perturbation low/med/high : 5×3 = 15 F1 scores
+        Total N = 20 per model (or fewer if perturbation was skipped).
         """
-        logger.info("\n[STEP 4] Statistical Analysis (Sample-Level)")
-        
+        logger.info("\n[STEP 4] Statistical Analysis (F1 per condition)")
+
         if len(all_results) < 2:
             logger.info("Skipping statistical analysis (need at least 2 models)")
             return {'status': 'skipped', 'reason': 'insufficient_models'}
-        
+
         with Timer() as timer:
             analyzer = StatisticalAnalyzer()
-            
-            # Use a dictionary to store arrays of scores for ALL samples
-            model_sample_scores = {}
-            
+
+            # Build one F1 sequence per model over all (domain × condition) pairs
+            model_f1_sequences: Dict[str, np.ndarray] = {}
+
             for model_name, results in all_results.items():
-                all_model_scores = []
-                
-                # Iterate through every domain in this model
-                for domain, domain_results in results['in_domain'].items():
-                    # Extract raw probabilities: list of [prob_non_clickbait, prob_clickbait]
-                    probs = np.array(domain_results['probabilities'])
-                    
-                    # We take the probability of the positive class (clickbait)
-                    # This gives us N=75 (or more) data points per model instead of N=5
-                    clickbait_scores = probs[:, 1] 
-                    all_model_scores.extend(clickbait_scores.tolist())
-                
-                model_sample_scores[model_name] = np.array(all_model_scores)
-            
-            # Perform pairwise comparisons
-            model_names = list(model_sample_scores.keys())
-            comparisons = {}
-            
+                f1_scores: List[float] = []
+
+                # 1. In-domain F1 — one observation per specialist domain
+                for domain, domain_results in results.get('in_domain', {}).items():
+                    f1_scores.append(float(domain_results['metrics']['f1']))
+
+                # 2. Perturbation F1 — one observation per (domain × level)
+                for domain, levels in results.get('perturbation', {}).items():
+                    for level in ['low', 'medium', 'high']:
+                        if level in levels:
+                            f1_scores.append(float(levels[level]['metrics']['f1']))
+
+                model_f1_sequences[model_name] = np.array(f1_scores)
+                logger.info(
+                    f"  {model_name}: {len(f1_scores)} F1 observations "
+                    f"(mean={np.mean(f1_scores):.4f})"
+                )
+
+            # Pairwise Bayesian comparisons
+            model_names = list(model_f1_sequences.keys())
+            comparisons: Dict[str, Any] = {}
+
             for i in range(len(model_names)):
                 for j in range(i + 1, len(model_names)):
                     model_a, model_b = model_names[i], model_names[j]
-                    
-                    logger.info(f"Comparing {model_a} vs {model_b} (N={len(model_sample_scores[model_a])})")
-                    
-                    # The StatisticalAnalyzer will now receive N ~ 375 scores
+                    scores_a = model_f1_sequences[model_a]
+                    scores_b = model_f1_sequences[model_b]
+
+                    # Align lengths (take the shorter) in case perturbation was
+                    # skipped for one model but not the other
+                    n = min(len(scores_a), len(scores_b))
+                    if len(scores_a) != len(scores_b):
+                        logger.warning(
+                            f"Score-vector length mismatch: {model_a}={len(scores_a)}, "
+                            f"{model_b}={len(scores_b)}. Truncating to {n}."
+                        )
+                    scores_a, scores_b = scores_a[:n], scores_b[:n]
+
+                    logger.info(
+                        f"  Comparing {model_a} vs {model_b} "
+                        f"(N={n} F1 conditions)"
+                    )
+
                     comparison = analyzer.analyze_model_comparison(
-                        model_a_scores=model_sample_scores[model_a],
-                        model_b_scores=model_sample_scores[model_b],
+                        model_a_scores=scores_a,
+                        model_b_scores=scores_b,
                         model_a_name=model_a,
                         model_b_name=model_b
                     )
                     comparisons[f"{model_a}_vs_{model_b}"] = comparison
-        
+
         return {
             'status': 'completed',
             'comparisons': comparisons,
-            'n_samples_per_model': len(model_sample_scores[model_names[0]])
+            'score_type': 'f1_per_condition',
+            'n_conditions_per_model': {
+                name: len(seq) for name, seq in model_f1_sequences.items()
+            }
         }
     
     def generate_summary(
@@ -458,6 +498,10 @@ def parse_arguments():
         help='Directory for evaluation results (default: evaluation_results)'
     )
     parser.add_argument(
+        '--train-output-dir', type=str, default='output',
+        help='Directory written by train_pipeline.py containing data_splits/ (default: output)'
+    )
+    parser.add_argument(
         '--device', type=str, default='auto',
         choices=['auto', 'cuda', 'cpu'],
         help='Device to use for evaluation (default: auto)'
@@ -483,6 +527,7 @@ def main():
             checkpoint_dir=args.checkpoint_dir,
             dataset_dir=args.dataset_dir,
             output_dir=args.output_dir,
+            train_output_dir=args.train_output_dir,
             device=args.device,
             random_seed=args.seed
         )
