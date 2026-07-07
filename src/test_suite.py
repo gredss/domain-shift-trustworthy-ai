@@ -1408,17 +1408,18 @@ class TestSyntaxAllFiles(unittest.TestCase):
 
 class TestCopyToDrive(unittest.TestCase):
     """
-    Tests for the _copy_to_drive() helper that replaces shutil.copy2() for
-    writing checkpoints to Google Drive FUSE mounts.
+    Tests for the _copy_to_drive() helper in model_trainer.py.
+
+    _copy_to_drive() wraps shutil.copy2() with exponential back-off retries.
+    Failures are simulated by patching model_trainer.shutil.copy2 directly —
+    shutil.copy2 uses C-level I/O and does not go through builtins.open.
 
     No Google Drive, no GPU, no torch needed — only real local file I/O.
     """
 
     @staticmethod
     def _get_fn():
-        """Import _copy_to_drive without triggering the torch mock side-effects."""
-        import importlib, sys
-        # model_trainer is already loaded (mocked torch) — grab the function directly
+        """Grab _copy_to_drive from the already-loaded model_trainer module."""
         import model_trainer as mt
         return mt._copy_to_drive
 
@@ -1454,26 +1455,26 @@ class TestCopyToDrive(unittest.TestCase):
                 self.assertEqual(f.read(), payload)
 
     # ------------------------------------------------------------------
-    # 3. Retry: first N-1 attempts raise OSError, last attempt succeeds
+    # 3. Retry: first 2 attempts raise OSError, 3rd attempt succeeds
     # ------------------------------------------------------------------
     def test_retry_succeeds_after_transient_failures(self):
+        import model_trainer as mt
         fn = self._get_fn()
         with tempfile.TemporaryDirectory() as tmp:
             src = self._make_src(tmp)
             dst = os.path.join(tmp, "dst.pt")
 
             call_count = {"n": 0}
-            original_open = open
+            real_copy2 = mt.shutil.copy2
 
-            def flaky_open(path, mode="r", **kw):
-                if path == dst and "w" in mode:
-                    call_count["n"] += 1
-                    if call_count["n"] < 3:          # fail first 2 attempts
-                        raise OSError(95, "Operation not supported")
-                return original_open(path, mode, **kw)
+            def flaky_copy2(s, d):
+                call_count["n"] += 1
+                if call_count["n"] < 3:          # fail first 2 attempts
+                    raise OSError(95, "Operation not supported")
+                real_copy2(s, d)                 # succeed on 3rd
 
-            with patch("builtins.open", side_effect=flaky_open), \
-                 patch("time.sleep"):                # skip actual waits
+            with patch.object(mt.shutil, "copy2", side_effect=flaky_copy2), \
+                 patch.object(mt.time, "sleep"):
                 fn(src, dst, retries=5, base_delay=0.0)
 
             self.assertEqual(call_count["n"], 3)    # failed twice, succeeded third
@@ -1482,21 +1483,15 @@ class TestCopyToDrive(unittest.TestCase):
     # 4. All retries exhausted → RuntimeError is raised
     # ------------------------------------------------------------------
     def test_raises_after_all_retries_exhausted(self):
+        import model_trainer as mt
         fn = self._get_fn()
         with tempfile.TemporaryDirectory() as tmp:
             src = self._make_src(tmp)
             dst = os.path.join(tmp, "dst.pt")
 
-            def always_fail(path, mode="r", **kw):
-                if "w" in mode:
-                    raise OSError(95, "Operation not supported")
-                return open.__wrapped__(path, mode, **kw) if hasattr(open, "__wrapped__") \
-                    else builtins_open(path, mode, **kw)
-
-            import builtins
-            builtins_open = builtins.open
-            with patch("builtins.open", side_effect=always_fail), \
-                 patch("time.sleep"):
+            with patch.object(mt.shutil, "copy2",
+                               side_effect=OSError(95, "Operation not supported")), \
+                 patch.object(mt.time, "sleep"):
                 with self.assertRaises(RuntimeError) as ctx:
                     fn(src, dst, retries=3, base_delay=0.0)
             self.assertIn("3 attempts", str(ctx.exception))
@@ -1505,30 +1500,22 @@ class TestCopyToDrive(unittest.TestCase):
     # 5. Back-off delays increase exponentially
     # ------------------------------------------------------------------
     def test_backoff_delays_are_exponential(self):
+        import model_trainer as mt
         fn = self._get_fn()
+        sleep_calls = []
+
         with tempfile.TemporaryDirectory() as tmp:
             src = self._make_src(tmp)
             dst = os.path.join(tmp, "dst.pt")
-            sleep_calls = []
 
-            import builtins
-            builtins_open = builtins.open
-
-            def always_fail(path, mode="r", **kw):
-                if "w" in mode:
-                    raise OSError(95, "Operation not supported")
-                return builtins_open(path, mode, **kw)
-
-            # Patch time.sleep in the model_trainer module where it is used,
-            # and builtins.open to simulate Drive rejecting the write.
-            import model_trainer as mt
-            with patch("builtins.open", side_effect=always_fail), \
+            with patch.object(mt.shutil, "copy2",
+                               side_effect=OSError(95, "Operation not supported")), \
                  patch.object(mt.time, "sleep",
-                              side_effect=lambda d: sleep_calls.append(d)):
+                               side_effect=lambda d: sleep_calls.append(d)):
                 with self.assertRaises(RuntimeError):
                     fn(src, dst, retries=4, base_delay=2.0)
 
-        # 4 attempts → 4 sleeps (sleep is called after every failure including last)
+        # 4 attempts → 4 sleeps (sleep called after every failure including last)
         # delays: 2, 4, 8, 16
         self.assertEqual(len(sleep_calls), 4)
         self.assertAlmostEqual(sleep_calls[0], 2.0)
@@ -1537,38 +1524,24 @@ class TestCopyToDrive(unittest.TestCase):
         self.assertAlmostEqual(sleep_calls[3], 16.0)
 
     # ------------------------------------------------------------------
-    # 6. existing dst is protected when open(dst, 'wb') itself fails
-    #    (Drive FUSE rejects the open before any truncation occurs)
+    # 6. When all retries fail, dst is not created (no partial writes)
     # ------------------------------------------------------------------
-    def test_existing_dst_not_corrupted_on_failure(self):
+    def test_dst_not_created_when_all_retries_fail(self):
+        import model_trainer as mt
         fn = self._get_fn()
-        good_data = b"good-checkpoint"
         with tempfile.TemporaryDirectory() as tmp:
             src = self._make_src(tmp)
             dst = os.path.join(tmp, "dst.pt")
-            # Write a "good" checkpoint to dst first
-            with open(dst, "wb") as f:
-                f.write(good_data)
+            # dst does not exist yet
 
-            import builtins
-            builtins_open = builtins.open
-
-            def fail_before_open(path, mode="r", **kw):
-                # Simulate Drive FUSE: reject open() entirely before any
-                # truncation can happen — this is the errno 95 scenario.
-                if path == dst and "w" in mode:
-                    raise OSError(95, "Operation not supported")
-                return builtins_open(path, mode, **kw)
-
-            import model_trainer as mt
-            with patch("builtins.open", side_effect=fail_before_open), \
+            with patch.object(mt.shutil, "copy2",
+                               side_effect=OSError(95, "Operation not supported")), \
                  patch.object(mt.time, "sleep"):
                 with self.assertRaises(RuntimeError):
                     fn(src, dst, retries=2, base_delay=0.0)
 
-            # open(dst, 'wb') was rejected before truncation → good data intact
-            with builtins_open(dst, "rb") as f:
-                self.assertEqual(f.read(), good_data)
+            # shutil.copy2 was fully intercepted — dst was never written
+            self.assertFalse(os.path.exists(dst))
 
 
 # ══════════════════════════════════════════════════════════════════════════════

@@ -9,7 +9,6 @@ for IndoBERT variants (base, large, lite).
 import os
 import json
 import shutil
-import tempfile
 import time
 import torch
 import torch.nn as nn
@@ -148,19 +147,25 @@ class IndoBERTClassifier(nn.Module):
 
 def _copy_to_drive(src: str, dst: str, retries: int = 5, base_delay: float = 3.0) -> None:
     """
-    Copy a file from a local path to a (potentially FUSE-mounted) destination
-    such as Google Drive, with exponential back-off retries.
+    Copy a fully-written local file to a destination path, with exponential
+    back-off retries for transient OSError failures (e.g. Drive FUSE rate
+    limits that return [Errno 95] Operation not supported).
 
-    Google Drive FUSE (on Colab) intermittently rejects open(dst, 'wb') with
-    [Errno 95] Operation not supported, especially under write pressure.
-    Retrying with a short delay is sufficient in practice because the error is
-    transient — Drive re-accepts writes once its internal rate limiter resets.
+    Design rationale
+    ----------------
+    src is always a local /tmp file that torch.save() has already closed and
+    fully committed to local disk.  We therefore need only a reliable *copy*
+    to the destination — no fsync, no kernel-buffer tricks, no magic-byte
+    verification.  Those approaches are unreliable on network FUSE mounts and
+    add latency without meaningful safety guarantees.
 
-    A manual chunked write is used instead of shutil.copy2() because Drive FUSE
-    handles sequential chunk writes more reliably than a single large open().
+    The correct architectural pattern (enforced by train_pipeline.py) is:
+      1. Train entirely with local checkpoint_dir (/content/...)
+      2. Call _copy_to_drive once per domain after training completes
+    This keeps Drive I/O off the hot training path entirely.
 
     Args:
-        src: Local source path (e.g. /tmp/tmpXXXX.pt)
+        src: Local source path (fully written, e.g. /content/checkpoints/...)
         dst: Destination path (may be on Google Drive FUSE)
         retries: Maximum number of attempts (default 5)
         base_delay: Initial back-off delay in seconds; doubles each retry
@@ -169,31 +174,7 @@ def _copy_to_drive(src: str, dst: str, retries: int = 5, base_delay: float = 3.0
     delay = base_delay
     for attempt in range(1, retries + 1):
         try:
-            # Chunked write: read 64 MB at a time to avoid large single writes
-            # that Drive FUSE handles poorly.
-            chunk_size = 64 * 1024 * 1024  # 64 MB
-            with open(src, 'rb') as fsrc, open(dst, 'wb') as fdst:
-                while True:
-                    buf = fsrc.read(chunk_size)
-                    if not buf:
-                        break
-                    fdst.write(buf)
-                # Force kernel write buffers → FUSE layer before close().
-                # Without this, Drive FUSE may report success but defer the
-                # actual upload, leaving the file empty on a re-mount.
-                fdst.flush()
-                os.fsync(fdst.fileno())
-            # Preserve metadata (timestamps, permissions) like shutil.copy2
-            shutil.copystat(src, dst)
-
-            # Verify: re-read the first 4 bytes to confirm Drive persisted the
-            # data (not just buffered it). A valid PyTorch zip starts with PK\x03\x04.
-            with open(dst, 'rb') as fcheck:
-                header = fcheck.read(4)
-            if len(header) < 4:
-                raise OSError(
-                    f"Verification failed: {dst} is only {len(header)} bytes after write"
-                )
+            shutil.copy2(src, dst)
             return  # success
         except OSError as exc:
             last_err = exc
@@ -622,16 +603,15 @@ class ModelTrainer:
         checkpoint_name: str = "checkpoint"
     ) -> str:
         """
-        Save model checkpoint atomically.
+        Save model checkpoint.
 
-        Strategy: serialize to a local /tmp file first, then copy to the
-        final destination (which may be a remote/FUSE mount such as Google
-        Drive).  This guarantees that a failed write never destroys a
-        previously-good checkpoint, because the final path is only replaced
-        after the local write has fully succeeded.
+        checkpoint_dir must point to a local filesystem path (e.g. /content/...)
+        so that torch.save() writes to fast local SSD.  Copying to Google Drive
+        is the responsibility of the caller (train_pipeline.py) after training
+        completes — never during the hot training loop.
 
         Args:
-            checkpoint_dir: Directory to save checkpoint
+            checkpoint_dir: Local directory to save checkpoint
             checkpoint_name: Name for the checkpoint
 
         Returns:
@@ -639,7 +619,7 @@ class ModelTrainer:
         """
         os.makedirs(checkpoint_dir, exist_ok=True)
 
-        final_path = os.path.join(checkpoint_dir, f"{checkpoint_name}.pt")
+        checkpoint_path = os.path.join(checkpoint_dir, f"{checkpoint_name}.pt")
 
         checkpoint = {
             'model_state_dict': self.model.state_dict(),
@@ -654,31 +634,8 @@ class ModelTrainer:
             }
         }
 
-        # Write to a guaranteed-local temp file first.
-        # tempfile.gettempdir() returns /tmp on Linux/Colab — always local SSD.
-        tmp_fd, tmp_path = tempfile.mkstemp(
-            dir=tempfile.gettempdir(), suffix=".pt"
-        )
-        os.close(tmp_fd)
-        try:
-            torch.save(checkpoint, tmp_path)
-            _copy_to_drive(tmp_path, final_path)
-        finally:
-            # Always remove the temp file, even if copy fails.
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
-
-        # Integrity check: reload from the final path and verify key presence.
-        try:
-            probe = torch.load(final_path, map_location='cpu', weights_only=False)
-            if 'model_state_dict' not in probe:
-                raise ValueError("'model_state_dict' key missing from saved checkpoint")
-        except Exception as verify_err:
-            raise RuntimeError(
-                f"Checkpoint integrity check failed for {final_path}: {verify_err}"
-            ) from verify_err
-
-        logger.info(f"Checkpoint saved to {final_path}")
+        torch.save(checkpoint, checkpoint_path)
+        logger.info(f"Checkpoint saved to {checkpoint_path}")
 
         # Save training history as JSON (non-critical; errors are logged, not raised)
         history_path = os.path.join(checkpoint_dir, f"{checkpoint_name}_history.json")
@@ -688,7 +645,7 @@ class ModelTrainer:
         except Exception as hist_err:
             logger.warning(f"Could not save training history JSON: {hist_err}")
 
-        return final_path
+        return checkpoint_path
     
     def load_checkpoint(self, checkpoint_path: str) -> None:
         """

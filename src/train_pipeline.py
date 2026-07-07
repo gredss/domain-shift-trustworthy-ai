@@ -31,7 +31,7 @@ from typing import Dict, Any, List
 
 from config import config
 from data_manager import DataManager
-from model_trainer import ModelTrainer, HyperparameterSearch
+from model_trainer import ModelTrainer, HyperparameterSearch, _copy_to_drive
 from utils import file_manager, reproducibility, Timer, get_timestamp
 
 logging.basicConfig(
@@ -169,25 +169,34 @@ class TrainingPipeline:
         self,
         full_model_name: str,
         model_name: str,
-        domain: str, # ADDED: The domain name
+        domain: str,
         train_df: Any,
         val_df: Any
     ) -> Dict[str, Any]:
-        """Train model with default hyperparameters."""
-        
-        
+        """Train model with default hyperparameters.
 
+        Checkpoints are written to a local staging directory on /content/ (fast
+        local SSD) during training.  Only after the full domain training run
+        completes are the files copied once to the Drive destination.  This
+        keeps all per-epoch torch.save() calls off the Drive FUSE mount.
+        """
         trainer = ModelTrainer(
             model_name=full_model_name,
             max_length=config.model.MAX_SEQUENCE_LENGTH,
             device=self.device,
             random_seed=self.random_seed
         )
-        
-        # CRITICAL FIX: Save into checkpoints/{model_name}/{domain}/
-        model_checkpoint_dir = os.path.join(self.checkpoint_dir, model_name, domain)
-        file_manager.ensure_directory(model_checkpoint_dir)
-        
+
+        # Local staging dir — fast SSD, no FUSE involved
+        local_checkpoint_dir = os.path.join(
+            "/content/checkpoints_staging", model_name, domain
+        )
+        file_manager.ensure_directory(local_checkpoint_dir)
+
+        # Final Drive destination (may be the same path when running locally)
+        drive_checkpoint_dir = os.path.join(self.checkpoint_dir, model_name, domain)
+        file_manager.ensure_directory(drive_checkpoint_dir)
+
         history = trainer.train(
             train_df=train_df,
             val_df=val_df,
@@ -197,21 +206,30 @@ class TrainingPipeline:
             weight_decay=config.training.WEIGHT_DECAY,
             dropout_rate=config.model.DROPOUT_RATE,
             early_stopping_patience=config.training.EARLY_STOPPING_PATIENCE,
-            checkpoint_dir=model_checkpoint_dir
+            checkpoint_dir=local_checkpoint_dir
         )
-        
-        history_file = os.path.join(model_checkpoint_dir, 'training_history.json')
+
+        history_file = os.path.join(local_checkpoint_dir, 'training_history.json')
         file_manager.save_json(history, history_file)
-        
+
+        # Copy all checkpoint files from local staging → Drive once, after
+        # training completes.  One copy per domain instead of one per epoch.
+        for filename in os.listdir(local_checkpoint_dir):
+            src = os.path.join(local_checkpoint_dir, filename)
+            dst = os.path.join(drive_checkpoint_dir, filename)
+            if os.path.isfile(src):
+                logger.info(f"Copying {filename} → Drive ({domain})")
+                _copy_to_drive(src, dst)
+
         best_f1 = max(history['val_f1'])
-        
+
         return {
             'model_name': model_name,
             'domain': domain,
             'full_model_name': full_model_name,
             'history': history,
             'best_f1': best_f1,
-            'checkpoint_dir': model_checkpoint_dir,
+            'checkpoint_dir': drive_checkpoint_dir,
             'hyperparameters': {
                 'learning_rate': config.training.LEARNING_RATE,
                 'batch_size': config.training.BATCH_SIZE,
@@ -224,17 +242,25 @@ class TrainingPipeline:
         self,
         full_model_name: str,
         model_name: str,
-        domain: str, # ADDED: The domain name
+        domain: str,
         train_df: Any,
         val_df: Any
     ) -> Dict[str, Any]:
-        """Train model with hyperparameter grid search for a specific domain."""
-        
-        # 1. Define domain-specific checkpoint directory
-        model_checkpoint_dir = os.path.join(self.checkpoint_dir, model_name, domain)
-        file_manager.ensure_directory(model_checkpoint_dir)
-                
-        # 2. Run Grid Search
+        """Train model with hyperparameter grid search for a specific domain.
+
+        Same local-staging → Drive-copy pattern as _train_with_defaults.
+        """
+        # Local staging dir
+        local_checkpoint_dir = os.path.join(
+            "/content/checkpoints_staging", model_name, domain
+        )
+        file_manager.ensure_directory(local_checkpoint_dir)
+
+        # Final Drive destination
+        drive_checkpoint_dir = os.path.join(self.checkpoint_dir, model_name, domain)
+        file_manager.ensure_directory(drive_checkpoint_dir)
+
+        # 2. Run Grid Search (results saved locally)
         grid_search = HyperparameterSearch(
             model_name=full_model_name,
             param_grid=config.training.GRID_SEARCH_PARAMS,
@@ -242,43 +268,49 @@ class TrainingPipeline:
             device=self.device,
             random_seed=self.random_seed
         )
-        
+
         search_results = grid_search.search(
             train_df=train_df,
             val_df=val_df,
             num_epochs=config.training.NUM_EPOCHS
         )
-        
-        # Save grid search results inside the domain folder
-        search_file = os.path.join(model_checkpoint_dir, 'grid_search_results.json')
+
+        search_file = os.path.join(local_checkpoint_dir, 'grid_search_results.json')
         grid_search.save_results(search_file)
-        
+
         logger.info(f"Training final {domain} specialist with best params: {search_results['best_params']}")
 
-
-        # 3. Train the final specialist model
+        # 3. Train the final specialist model (local staging)
         trainer = ModelTrainer(
             model_name=full_model_name,
             max_length=config.model.MAX_SEQUENCE_LENGTH,
             device=self.device,
             random_seed=self.random_seed
         )
-        
+
         history = trainer.train(
             train_df=train_df,
             val_df=val_df,
             num_epochs=config.training.NUM_EPOCHS,
-            checkpoint_dir=model_checkpoint_dir, # This ensures the best model is saved here
+            checkpoint_dir=local_checkpoint_dir,
             **search_results['best_params']
         )
-        
-        file_manager.save_json(history, os.path.join(model_checkpoint_dir, 'training_history.json'))
-        
+
+        file_manager.save_json(history, os.path.join(local_checkpoint_dir, 'training_history.json'))
+
+        # Copy all files from local staging → Drive once
+        for filename in os.listdir(local_checkpoint_dir):
+            src = os.path.join(local_checkpoint_dir, filename)
+            dst = os.path.join(drive_checkpoint_dir, filename)
+            if os.path.isfile(src):
+                logger.info(f"Copying {filename} → Drive ({domain})")
+                _copy_to_drive(src, dst)
+
         return {
             'model_name': model_name,
             'domain': domain,
             'best_f1': search_results['best_f1'],
-            'checkpoint_dir': model_checkpoint_dir,
+            'checkpoint_dir': drive_checkpoint_dir,
             'hyperparameters': search_results['best_params'],
             'grid_search_results': search_results
         }
