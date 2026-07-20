@@ -162,7 +162,12 @@ class TrainingPipeline:
                     full_model_name, model_name, domain, train_df, val_df
                 )
         
-        logger.info(f"Training completed for {domain} in {timer.elapsed():.2f}s - Best F1: {results['best_f1']:.4f}")
+        logger.info(
+            f"Training completed for {domain} in {timer.elapsed():.2f}s | "
+            f"Macro-F1={results['best_macro_f1']:.4f} | "
+            f"F1_0={results['best_f1_0']:.4f} | "
+            f"F1_1={results['best_f1_1']:.4f}"
+        )
         
         return results
     
@@ -227,14 +232,21 @@ class TrainingPipeline:
                 logger.info(f"Copying {filename} → Drive ({domain})")
                 _copy_to_drive(src, dst)
 
-        best_f1 = max(history['val_f1'])
+        best_macro_f1 = max(history['val_macro_f1'])
+        best_epoch = history['val_macro_f1'].index(best_macro_f1)
 
         return {
             'model_name': model_name,
             'domain': domain,
             'full_model_name': full_model_name,
             'history': history,
-            'best_f1': best_f1,
+            
+            'best_epoch': best_epoch + 1,
+
+            'best_macro_f1': best_macro_f1,
+            'best_f1_0': history['val_f1_0'][best_epoch],
+            'best_f1_1': history['val_f1_1'][best_epoch],
+
             'checkpoint_dir': drive_checkpoint_dir,
             'hyperparameters': {
                 'learning_rate': config.training.LEARNING_RATE,
@@ -314,11 +326,17 @@ class TrainingPipeline:
             if os.path.isfile(src):
                 logger.info(f"Copying {filename} → Drive ({domain})")
                 _copy_to_drive(src, dst)
+		
+        best_macro_f1 = max(history['val_macro_f1'])
+        best_epoch = history['val_macro_f1'].index(best_macro_f1)
 
         return {
             'model_name': model_name,
             'domain': domain,
-            'best_f1': search_results['best_f1'],
+            'best_epoch': best_epoch + 1,
+            'best_macro_f1': max(history['val_macro_f1']),
+            'best_f1_0': history['val_f1_0'][best_epoch],
+            'best_f1_1': history['val_f1_1'][best_epoch],
             'checkpoint_dir': drive_checkpoint_dir,
             'hyperparameters': search_results['best_params'],
             'grid_search_results': search_results
@@ -350,7 +368,10 @@ class TrainingPipeline:
             for domain_name, info in domain_results.items():
 
                 summary["training_results"][model_name][domain_name] = {
-                    "best_f1": info["best_f1"],
+                    "best_epoch": info["best_epoch"],
+                    "best_macro_f1": info["best_macro_f1"],
+                    "best_f1_0": info["best_f1_0"],
+                    "best_f1_1": info["best_f1_1"],
                     "checkpoint_dir": info["checkpoint_dir"],
                     "hyperparameters": info["hyperparameters"]
                 }
@@ -363,13 +384,17 @@ class TrainingPipeline:
         logger.info(f"  Total samples: {summary['total_samples']}")
         logger.info(f"  Domains: {', '.join(summary['domains'])}")
         logger.info(f"  Models trained: {', '.join(summary['models_trained'])}")
-        logger.info("  Best F1 Scores:")
+        logger.info("  Best Macro-F1 Scores:")
         for model_name, domain_results in summary["training_results"].items():
             logger.info(f"    {model_name}:")
             for domain_name, info in domain_results.items():
                 logger.info(
-                    f"      {domain_name}: {info['best_f1']:.4f}"
-                )    
+                    f"      {domain_name}: "
+                    f"Epoch={info['best_epoch']}, "
+                    f"Macro-F1={info['best_macro_f1']:.4f}, "
+                    f"F1_0={info['best_f1_0']:.4f}, "
+                    f"F1_1={info['best_f1_1']:.4f}"
+                )
     
     def run(self, models: List[str] = ['base'], perform_grid_search: bool = False) -> Dict[str, Any]:
         logger.info("\nStarting SPECIALIST Training Pipeline")
