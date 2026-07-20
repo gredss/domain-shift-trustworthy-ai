@@ -28,14 +28,22 @@ import matplotlib.pyplot as plt
 # ──────────────────────────────────────────────────────────────────────────────
 
 DOMAINS = ["Education", "Health", "Politics", "Sport", "Technology"]
-METRICS = ["accuracy", "f1", "precision", "recall", "mcc", "roc_auc"]
+METRICS = [
+    "accuracy",
+    "macro_f1",
+    "macro_precision",
+    "macro_recall",
+    "mcc",
+    "roc_auc",
+]
+
 METRIC_LABELS = {
-    "accuracy":  "Accuracy",
-    "f1":        "F1-Score",
-    "precision": "Precision",
-    "recall":    "Recall",
-    "mcc":       "MCC",
-    "roc_auc":   "ROC-AUC",
+    "accuracy": "Accuracy",
+    "macro_f1": "Macro_F1",
+    "macro_precision": "Macro-Precision",
+    "macro_recall": "Macro-Recall",
+    "mcc": "MCC",
+    "roc_auc": "ROC-AUC",
 }
 PERTURB_LEVELS = ["clean", "low", "medium", "high"]
 SEP_THICK = "═" * 80
@@ -138,7 +146,7 @@ def _print_in_domain(in_domain: Dict[str, Any]) -> None:
     for dom in DOMAINS:
         if dom not in in_domain:
             continue
-        f1 = _v(in_domain[dom]["metrics"].get("f1", 0))
+        f1 = _v(in_domain[dom]["metrics"].get("macro_f1", 0))
         print(f"  {dom:<12} {_bar(f1)} {f1:.4f}")
 
 
@@ -146,7 +154,7 @@ def _print_in_domain(in_domain: Dict[str, Any]) -> None:
 # 2.  CROSS-DOMAIN F1 MATRIX  (rows = source, cols = target)
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _print_cross_domain_matrix(cross_domain: dict, metric: str = "f1") -> None:
+def _print_cross_domain_matrix(cross_domain: dict, metric: str = "macro_f1") -> None:
     _section(2, f"CROSS-DOMAIN MATRIX — {METRIC_LABELS[metric]}  (Row=Source, Col=Target)")
 
     col_w = 12
@@ -204,7 +212,12 @@ def _print_domain_shift(cross_domain: dict, in_domain: dict) -> None:
     )
 
     # Per-metric SD/TD table
-    sub_metrics = ["f1", "accuracy", "precision", "recall"]
+    sub_metrics = [
+		"macro_f1",
+		"accuracy",
+		"macro_precision",
+		"macro_recall",
+	]
     col_w = 10
 
     print(f"  {'Pair (src→tgt)':<26}", end="")
@@ -236,10 +249,10 @@ def _print_domain_shift(cross_domain: dict, in_domain: dict) -> None:
                 print(f"  {sd_val:>+10.4f}  {td_val:>+10.4f}", end="")
             print()
 
-            all_sd_f1.append(_v(ds.get("sd_f1", 0)))
-            all_td_f1.append(_v(ds.get("td_f1", 0)))
-            worst_sd.append((src, tgt, _v(ds.get("sd_f1", 0))))
-            worst_td.append((src, tgt, _v(ds.get("td_f1", 0))))
+            all_sd_f1.append(_v(ds.get("sd_macro_f1", 0)))
+            all_td_f1.append(_v(ds.get("td_macro_f1", 0)))
+            worst_sd.append((src, tgt, _v(ds.get("sd_macro_f1", 0))))
+            worst_td.append((src, tgt, _v(ds.get("td_macro_f1", 0))))
 
     # aggregates
     print("  " + SEP_THIN)
@@ -254,10 +267,10 @@ def _print_domain_shift(cross_domain: dict, in_domain: dict) -> None:
         worst_td.sort(key=lambda x: x[2], reverse=True)
         print(f"\n  Top-3 worst Source Drop (F1):")
         for src, tgt, val in worst_sd[:3]:
-            print(f"    {src}→{tgt}  SD_F1 = {val:+.4f}")
+            print(f"    {src}→{tgt}  SD_Macro_F1 = {val:+.4f}")
         print(f"\n  Top-3 worst Target Drop (F1):")
         for src, tgt, val in worst_td[:3]:
-            print(f"    {src}→{tgt}  TD_F1 = {val:+.4f}")
+            print(f"    {src}→{tgt}  TD_Macro_F1 = {val:+.4f}")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -320,12 +333,12 @@ def _print_perturbation(perturbation: dict, in_domain: dict) -> None:
         pdom = perturbation.get(dom, {})
         # 'clean' comes from in_domain if not directly in perturbation
         clean_f1 = _v(
-            pdom.get("clean", {}).get("metrics", {}).get("f1")
-            or in_domain.get(dom, {}).get("metrics", {}).get("f1", 0)
+            pdom.get("clean", {}).get("metrics", {}).get("macro_f1")
+            or in_domain.get(dom, {}).get("metrics", {}).get("macro_f1", 0)
         )
         row_vals = {"clean": clean_f1}
         for lvl in ["low", "medium", "high"]:
-            row_vals[lvl] = _v(pdom.get(lvl, {}).get("metrics", {}).get("f1", 0))
+            row_vals[lvl] = _v(pdom.get(lvl, {}).get("metrics", {}).get("macro_f1", 0))
 
         high_f1 = row_vals["high"]
         drop = clean_f1 - high_f1
@@ -345,14 +358,14 @@ def _print_perturbation(perturbation: dict, in_domain: dict) -> None:
         if lvl == "clean":
             vals = [
                 _v(
-                    perturbation.get(d, {}).get("clean", {}).get("metrics", {}).get("f1")
-                    or in_domain.get(d, {}).get("metrics", {}).get("f1", 0)
+                    perturbation.get(d, {}).get("clean", {}).get("metrics", {}).get("macro_f1")
+                    or in_domain.get(d, {}).get("metrics", {}).get("macro_f1", 0)
                 )
                 for d in DOMAINS
             ]
         else:
             vals = [
-                _v(perturbation.get(d, {}).get(lvl, {}).get("metrics", {}).get("f1", 0))
+                _v(perturbation.get(d, {}).get(lvl, {}).get("metrics", {}).get("macro_f1", 0))
                 for d in DOMAINS
             ]
         print(f"  {np.mean(vals):>{col_w}.4f}", end="")
@@ -365,7 +378,7 @@ def _print_perturbation(perturbation: dict, in_domain: dict) -> None:
         clean_mets = in_domain.get(dom, {}).get("metrics", {})
         print(f"  [{dom}]")
         print(f"  {'Level':<10}", end="")
-        for m in ["accuracy", "f1", "precision", "recall"]:
+        for m in ["accuracy","macro_f1","macro_precision","macro_recall"]:
             print(f"  {METRIC_LABELS[m]:>{col_w}}", end="")
         print()
         for lvl in PERTURB_LEVELS:
@@ -374,7 +387,7 @@ def _print_perturbation(perturbation: dict, in_domain: dict) -> None:
             else:
                 mets = pdom.get(lvl, {}).get("metrics", {})
             print(f"  {lvl.capitalize():<10}", end="")
-            for m in ["accuracy", "f1", "precision", "recall"]:
+            for m in ["accuracy","macro_f1","macro_precision","macro_recall"]:
                 print(f"  {_v(mets.get(m, 0)):>{col_w}.4f}", end="")
             print()
         print()
@@ -450,7 +463,7 @@ def _print_global_summary(in_domain: dict, cross_domain: dict, perturbation: dic
 
     # In-domain averages
     print(f"\n  ── In-Domain (Specialist on Own Data) ──")
-    for m in ["accuracy", "f1", "precision", "recall", "mcc"]:
+    for m in ["accuracy","macro_f1","macro_precision","macro_recall","mcc"]:
         vals = [_v(in_domain[d]["metrics"].get(m, 0)) for d in DOMAINS if d in in_domain]
         lbl = METRIC_LABELS[m]
         mean = np.mean(vals) if vals else 0.0
@@ -458,7 +471,7 @@ def _print_global_summary(in_domain: dict, cross_domain: dict, perturbation: dic
 
     # Cross-domain OOD averages
     print(f"\n  ── Cross-Domain OOD (src ≠ tgt) ──")
-    for m in ["accuracy", "f1", "precision", "recall"]:
+    for m in ["accuracy","macro_f1","macro_precision","macro_recall"]:
         vals = [
             _v(cross_domain.get(f"{src}->{tgt}", {}).get("metrics", {}).get(m, 0))
             for src in DOMAINS
@@ -473,10 +486,10 @@ def _print_global_summary(in_domain: dict, cross_domain: dict, perturbation: dic
     print(f"\n  ── Perturbation (avg F1 across domains) ──")
     for lvl in PERTURB_LEVELS:
         if lvl == "clean":
-            vals = [_v(in_domain.get(d, {}).get("metrics", {}).get("f1", 0)) for d in DOMAINS]
+            vals = [_v(in_domain.get(d, {}).get("metrics", {}).get("macro_f1", 0)) for d in DOMAINS]
         else:
             vals = [
-                _v(perturbation.get(d, {}).get(lvl, {}).get("metrics", {}).get("f1", 0))
+                _v(perturbation.get(d, {}).get(lvl, {}).get("metrics", {}).get("macro_f1", 0))
                 for d in DOMAINS
             ]
         mean = np.mean(vals) if vals else 0.0
@@ -485,12 +498,12 @@ def _print_global_summary(in_domain: dict, cross_domain: dict, perturbation: dic
     # Domain shift aggregates
     print(f"\n  ── Domain Shift (mean F1 delta) ──")
     sd_vals = [
-        _v(cross_domain.get(f"{src}->{tgt}", {}).get("domain_shift", {}).get("sd_f1", 0))
+        _v(cross_domain.get(f"{src}->{tgt}", {}).get("domain_shift", {}).get("sd_macro_f1", 0))
         for src in DOMAINS for tgt in DOMAINS if src != tgt
         if "domain_shift" in cross_domain.get(f"{src}->{tgt}", {})
     ]
     td_vals = [
-        _v(cross_domain.get(f"{src}->{tgt}", {}).get("domain_shift", {}).get("td_f1", 0))
+        _v(cross_domain.get(f"{src}->{tgt}", {}).get("domain_shift", {}).get("td_macro_f1", 0))
         for src in DOMAINS for tgt in DOMAINS if src != tgt
         if "domain_shift" in cross_domain.get(f"{src}->{tgt}", {})
     ]
@@ -525,14 +538,14 @@ def _plot_perturbation_curves(perturbation: dict,
             .get("f1")
             or in_domain.get(dom, {})
             .get("metrics", {})
-            .get("f1", 0)
+            .get("macro_f1", 0)
         )
 
         values = [
             clean,
-            _v(perturbation.get(dom, {}).get("low", {}).get("metrics", {}).get("f1", 0)),
-            _v(perturbation.get(dom, {}).get("medium", {}).get("metrics", {}).get("f1", 0)),
-            _v(perturbation.get(dom, {}).get("high", {}).get("metrics", {}).get("f1", 0))
+            _v(perturbation.get(dom, {}).get("low", {}).get("metrics", {}).get("macro_f1", 0)),
+            _v(perturbation.get(dom, {}).get("medium", {}).get("metrics", {}).get("macro_f1", 0)),
+            _v(perturbation.get(dom, {}).get("high", {}).get("metrics", {}).get("macro_f1", 0))
         ]
 
         # Apply the offset to the x-coordinates
@@ -590,13 +603,13 @@ def _plot_mean_perturbation(perturbation, in_domain,
 
         for dom in DOMAINS:
             if lvl == "clean":
-                f1 = _v(in_domain.get(dom, {}).get("metrics", {}).get("f1", 0))
+                f1 = _v(in_domain.get(dom, {}).get("metrics", {}).get("macro_f1", 0))
             else:
                 f1 = _v(
                     perturbation.get(dom, {})
                     .get(lvl, {})
                     .get("metrics", {})
-                    .get("f1", 0)
+                    .get("macro_f1", 0)
                 )
             vals.append(f1)
 
@@ -672,7 +685,7 @@ def print_full_evaluation_summary(
     print(f"{'═' * 80}")
 
     _print_in_domain(in_domain)
-    _print_cross_domain_matrix(cross_domain, metric="f1")
+    _print_cross_domain_matrix(cross_domain, metric="macro_f1")
     _print_domain_shift(cross_domain, in_domain)
     _print_cross_domain_full(cross_domain)
     _print_perturbation(perturbation, in_domain)
