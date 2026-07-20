@@ -27,6 +27,10 @@ import numpy as np
 from tqdm import tqdm
 import logging
 from datetime import datetime
+from sklearn.metrics import (
+    accuracy_score,
+    precision_recall_fscore_support
+)
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -451,26 +455,37 @@ class ModelTrainer:
         # Calculate metrics
         all_predictions = np.array(all_predictions)
         all_labels = np.array(all_labels)
-        
-        accuracy = (all_predictions == all_labels).mean()
-        
-        # Calculate precision, recall, F1 for positive class
-        tp = ((all_predictions == 1) & (all_labels == 1)).sum()
-        fp = ((all_predictions == 1) & (all_labels == 0)).sum()
-        fn = ((all_predictions == 0) & (all_labels == 1)).sum()
-        
-        precision = tp / (tp + fp) if (tp + fp) > 0 else 0
-        recall = tp / (tp + fn) if (tp + fn) > 0 else 0
-        f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
-        
+
+        accuracy = accuracy_score(all_labels, all_predictions)
+
+        precision, recall, f1, _ = precision_recall_fscore_support(
+          all_labels,
+          all_predictions,
+          labels=[0, 1],
+          average=None,
+          zero_division=0
+        )
+
+        macro_f1 = np.mean(f1)
+
         avg_loss = total_loss / len(val_loader)
-        
+
         return {
-            'loss': avg_loss,
-            'accuracy': accuracy,
-            'precision': precision,
-            'recall': recall,
-            'f1': f1
+          'loss': avg_loss,
+          'accuracy': accuracy,
+
+          # class 0
+          'precision_0': precision[0],
+          'recall_0': recall[0],
+          'f1_0': f1[0],
+
+          # class 1
+          'precision_1': precision[1],
+          'recall_1': recall[1],
+          'f1_1': f1[1],
+
+          # macro
+          'macro_f1': macro_f1
         }
     
     def train(
@@ -521,7 +536,7 @@ class ModelTrainer:
         )
         
         # Training loop
-        best_f1 = -1
+        best_macro_f1 = -1
         patience_counter = 0 
 
         for epoch in range(1, num_epochs + 1):
@@ -534,10 +549,12 @@ class ModelTrainer:
             # Evaluate
             val_metrics = self.evaluate(val_loader)
             logger.info(
-                f"Val Loss: {val_metrics['loss']:.4f}, "
-                f"Accuracy: {val_metrics['accuracy']:.4f}, "
-                f"F1: {val_metrics['f1']:.4f}"
-            )
+				f"Val Loss: {val_metrics['loss']:.4f}, "
+				f"Accuracy: {val_metrics['accuracy']:.4f}, "
+				f"F1_0: {val_metrics['f1_0']:.4f}, "
+				f"F1_1: {val_metrics['f1_1']:.4f}, "
+				f"Macro-F1: {val_metrics['macro_f1']:.4f}"
+			)
             
             # Save history
             self.training_history.append({
@@ -546,22 +563,29 @@ class ModelTrainer:
                 'train_accuracy': train_metrics['accuracy'],
                 'val_loss': val_metrics['loss'],
                 'val_accuracy': val_metrics['accuracy'],
-                'val_precision': val_metrics['precision'],
-                'val_recall': val_metrics['recall'],
-                'val_f1': val_metrics['f1']
+				
+                'val_precision_0': val_metrics['precision_0'],
+				'val_recall_0': val_metrics['recall_0'],
+				'val_f1_0': val_metrics['f1_0'],
+
+				'val_precision_1': val_metrics['precision_1'],
+				'val_recall_1': val_metrics['recall_1'],
+				'val_f1_1': val_metrics['f1_1'],
+
+				'val_macro_f1': val_metrics['macro_f1']
             })
             
             # Check for improvement
             # We use >= 0 to ensure we at least save the first epoch's model
-            if val_metrics['f1'] > best_f1: 
-                best_f1 = val_metrics['f1']
+            if val_metrics['macro_f1'] > best_macro_f1: 
+                best_macro_f1 = val_metrics['macro_f1']
                 patience_counter = 0
                 
                 # Save best model
                 if checkpoint_dir:
                     # We save even if F1 is 0.0, so you have at least one checkpoint
                     self.save_checkpoint(checkpoint_dir, f"best_model")
-                    logger.info(f"Model saved with F1: {best_f1:.4f}")
+                    logger.info(f"Model saved with Macro-F1: {best_macro_f1:.4f}")
             else:
                 patience_counter += 1
                 logger.info(f"No improvement. Patience: {patience_counter}/{early_stopping_patience}")
@@ -577,15 +601,22 @@ class ModelTrainer:
     def _format_history(self) -> Dict[str, List[float]]:
         """Format training history for easy access."""
         history = {
-            'epochs': [],
-            'train_loss': [],
-            'train_accuracy': [],
-            'val_loss': [],
-            'val_accuracy': [],
-            'val_precision': [],
-            'val_recall': [],
-            'val_f1': []
-        }
+			'epochs': [],
+			'train_loss': [],
+			'train_accuracy': [],
+			'val_loss': [],
+			'val_accuracy': [],
+
+			'val_precision_0': [],
+			'val_recall_0': [],
+			'val_f1_0': [],
+
+			'val_precision_1': [],
+			'val_recall_1': [],
+			'val_f1_1': [],
+
+			'val_macro_f1': []
+		}
         
         for entry in self.training_history:
             history['epochs'].append(entry['epoch'])
@@ -593,9 +624,16 @@ class ModelTrainer:
             history['train_accuracy'].append(entry['train_accuracy'])
             history['val_loss'].append(entry['val_loss'])
             history['val_accuracy'].append(entry['val_accuracy'])
-            history['val_precision'].append(entry['val_precision'])
-            history['val_recall'].append(entry['val_recall'])
-            history['val_f1'].append(entry['val_f1'])
+            
+            history['val_precision_0'].append(entry['val_precision_0'])
+            history['val_recall_0'].append(entry['val_recall_0'])
+            history['val_f1_0'].append(entry['val_f1_0'])
+
+            history['val_precision_1'].append(entry['val_precision_1'])
+            history['val_recall_1'].append(entry['val_recall_1'])
+            history['val_f1_1'].append(entry['val_f1_1'])
+
+            history['val_macro_f1'].append(entry['val_macro_f1'])
         
         return history
     
@@ -783,7 +821,7 @@ class HyperparameterSearch:
         
         logger.info(f"Testing {len(combinations)} hyperparameter combinations")
         
-        best_f1 = 0
+        best_macro_f1 = 0
         best_params = None
         
         for idx, combo in enumerate(combinations, 1):
@@ -806,28 +844,28 @@ class HyperparameterSearch:
             )
             
             # Get best F1 from this run
-            best_run_f1 = max(history['val_f1'])
+            best_run_macro_f1  = max(history['val_macro_f1'])
             
             # Store results
             result = {
                 'params': params,
-                'best_f1': best_run_f1,
+                'best_macro_f1': best_run_macro_f1 ,
                 'history': history
             }
             self.results.append(result)
             
             # Update best
-            if best_run_f1 > best_f1:
-                best_f1 = best_run_f1
+            if best_run_macro_f1  > best_macro_f1:
+                best_macro_f1 = best_run_macro_f1 
                 best_params = params
-                logger.info(f"New best F1: {best_f1:.4f}")
+                logger.info(f"New best F1: {best_macro_f1:.4f}")
         
-        logger.info(f"Grid search completed. Best F1: {best_f1:.4f}")
+        logger.info(f"Grid search completed. Best F1: {best_macro_f1:.4f}")
         logger.info(f"Best parameters: {best_params}")
         
         return {
             'best_params': best_params,
-            'best_f1': best_f1,
+            'best_f1': best_macro_f1,
             'all_results': self.results
         }
     
