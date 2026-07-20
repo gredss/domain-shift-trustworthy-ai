@@ -45,13 +45,68 @@ class MetricsCalculator:
             Dictionary containing all metrics
         """
         metrics = {
-            'accuracy': accuracy_score(y_true, y_pred),
-            'precision': precision_score(y_true, y_pred, average='binary', zero_division=0),
-            'recall': recall_score(y_true, y_pred, average='binary', zero_division=0),
-            'f1': f1_score(y_true, y_pred, average='binary', zero_division=0),
-            'mcc': matthews_corrcoef(y_true, y_pred),
-            'roc_auc': None
-        }
+			'accuracy': accuracy_score(y_true, y_pred),
+
+			# Macro metrics
+			'macro_precision': precision_score(
+				y_true, y_pred,
+				average='macro',
+				zero_division=0
+			),
+
+			'macro_recall': recall_score(
+				y_true, y_pred,
+				average='macro',
+				zero_division=0
+			),
+
+			'macro_f1': f1_score(
+				y_true, y_pred,
+				average='macro',
+				zero_division=0
+			),
+
+			# Class 0 (Non-clickbait)
+			'precision_0': precision_score(
+				y_true, y_pred,
+				average=None,
+				zero_division=0
+			)[0],
+
+			'recall_0': recall_score(
+				y_true, y_pred,
+				average=None,
+				zero_division=0
+			)[0],
+
+			'f1_0': f1_score(
+				y_true, y_pred,
+				average=None,
+				zero_division=0
+			)[0],
+
+			# Class 1 (Clickbait)
+			'precision_1': precision_score(
+				y_true, y_pred,
+				average=None,
+				zero_division=0
+			)[1],
+
+			'recall_1': recall_score(
+				y_true, y_pred,
+				average=None,
+				zero_division=0
+			)[1],
+
+			'f1_1': f1_score(
+				y_true, y_pred,
+				average=None,
+				zero_division=0
+			)[1],
+
+			'mcc': matthews_corrcoef(y_true, y_pred),
+			'roc_auc': None
+		}
         
         # Use y_proba for ROC-AUC
         if y_proba is not None:
@@ -85,7 +140,7 @@ class MetricsCalculator:
         """
         robustness = {}
         
-        for metric_name in ['accuracy', 'precision', 'recall', 'f1']:
+        for metric_name in ['accuracy','macro_precision','macro_recall','macro_f1']:
             if metric_name in clean_metrics and metric_name in perturbed_metrics:
                 clean_val = clean_metrics[metric_name]
                 perturbed_val = perturbed_metrics[metric_name]
@@ -116,7 +171,7 @@ class MetricsCalculator:
         shift_metrics = {}
 
         # Source Drop (SD)
-        for metric_name in ['accuracy', 'precision', 'recall', 'f1']:
+        for metric_name in ['accuracy','macro_precision','macro_recall','macro_f1']:
             if metric_name in source_metrics and metric_name in target_metrics:
                 source_val = source_metrics[metric_name]
                 cross_domain_val = target_metrics[metric_name]
@@ -134,7 +189,7 @@ class MetricsCalculator:
                     shift_metrics[f'sd_{metric_name}_pct'] = 0.0
 
         # Target Drop (TD)
-        for metric_name in ['accuracy', 'precision', 'recall', 'f1']:
+        for metric_name in ['accuracy','macro_precision','macro_recall','macro_f1']:
             if (
                 metric_name in in_domain_target_metrics
                 and metric_name in target_metrics
@@ -208,7 +263,11 @@ class InDomainEvaluator:
             'true_labels': y_true.tolist()
         }
         
-        logger.info(f"In-domain{domain_str} F1-Score: {metrics['f1']:.4f}")
+        logger.info(
+			f"In-domain Macro-F1={metrics['macro_f1']:.4f} | "
+			f"F1_0={metrics['f1_0']:.4f} | "
+			f"F1_1={metrics['f1_1']:.4f}"
+		)
         
         return results
     
@@ -327,7 +386,7 @@ class CrossDomainEvaluator:
     def create_performance_matrix(
         self,
         cross_domain_results: Dict[Tuple[str, str], Dict[str, Any]],
-        metric: str = 'f1'
+        metric: str = 'macro-f1'
     ) -> pd.DataFrame:
         """
         Create a performance matrix for visualization.
@@ -429,7 +488,7 @@ class PerturbationEvaluator:
         
         logger.info(
             f"{perturbation_level.capitalize()}-level perturbation{domain_str} "
-            f"F1-Score: {metrics['f1']:.4f}"
+            f"Macro-F1: {metrics['macro_f1']:.4f}"
         )
         
         return results
@@ -661,7 +720,7 @@ class EvaluationEngine:
                     
                     logger.info(
                         f"{source_domain} -> {target_domain} ({level}): "
-                        f"F1={perturbed_metrics['f1']:.4f}"
+						f"Macro-F1={perturbed_metrics['macro_f1']:.4f}"
                     )
         
         logger.info("Cross-domain perturbation evaluation complete")
@@ -788,22 +847,23 @@ class EvaluationEngine:
             for domain, domain_results in results['in_domain'].items():
                 metrics = domain_results['metrics']
                 report_lines.append(
-                    f"  {domain}: F1={metrics['f1']:.4f}, "
-                    f"Acc={metrics['accuracy']:.4f}, "
-                    f"Prec={metrics['precision']:.4f}, "
-                    f"Rec={metrics['recall']:.4f}"
+                    f"  {domain}: "
+					f"Macro-F1={metrics['macro_f1']:.4f}, "
+					f"Acc={metrics['accuracy']:.4f}, "
+					f"Macro-Prec={metrics['macro_precision']:.4f}, "
+					f"Macro-Rec={metrics['macro_recall']:.4f}"
                 )
             report_lines.append("")
         
         # Cross-domain summary
         if 'cross_domain' in results:
-            report_lines.append("CROSS-DOMAIN EVALUATION (F1-Scores):")
+            report_lines.append("CROSS-DOMAIN EVALUATION (Macro-F1):")
             report_lines.append("-" * 80)
             
             # Create performance matrix
             matrix = self.cross_domain_evaluator.create_performance_matrix(
                 results['cross_domain'],
-                metric='f1'
+                metric='macro_f1'
             )
             report_lines.append(matrix.to_string())
             report_lines.append("")
@@ -817,13 +877,13 @@ class EvaluationEngine:
                 for level in ['clean', 'low', 'medium', 'high']:
                     if level in pert_results:
                         metrics = pert_results[level]['metrics']
-                        f1 = metrics['f1']
-                        report_lines.append(f"    {level.capitalize()}: F1={f1:.4f}")
+                        macro_f1 = metrics['macro_f1']
+                        report_lines.append(f"    {level.capitalize()}: Macro-F1={macro_f1:.4f}")
                         
                         if level != 'clean' and 'robustness_metrics' in pert_results[level]:
                             rob = pert_results[level]['robustness_metrics']
-                            drop = rob.get('f1_drop', 0)
-                            drop_pct = rob.get('f1_drop_pct', 0)
+                            drop = rob.get('macro_f1_drop', 0)
+                            drop_pct = rob.get('macro_f1_drop_pct', 0)
                             report_lines.append(
                                 f"      Drop: {drop:.4f} ({drop_pct:.2f}%)"
                             )
