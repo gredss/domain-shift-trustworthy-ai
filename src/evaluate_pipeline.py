@@ -305,13 +305,13 @@ class EvaluationPipeline:
 
                 # 1. In-domain F1 — one observation per specialist domain
                 for domain, domain_results in results.get('in_domain', {}).items():
-                    f1_scores.append(float(domain_results['metrics']['f1']))
+                    f1_scores.append(float(domain_results['metrics']['macro_f1']))
 
                 # 2. Perturbation F1 — one observation per (domain × level)
                 for domain, levels in results.get('perturbation', {}).items():
                     for level in ['low', 'medium', 'high']:
                         if level in levels:
-                            f1_scores.append(float(levels[level]['metrics']['f1']))
+                            f1_scores.append(float(levels[level]['metrics']['macro_f1']))
 
                 model_f1_sequences[model_name] = np.array(f1_scores)
                 logger.info(
@@ -387,7 +387,7 @@ class EvaluationPipeline:
         for model_name, results in all_results.items():
             in_domain_f1 = []
             for domain, metrics in results['in_domain'].items():
-                in_domain_f1.append(metrics['metrics']['f1'])
+                in_domain_f1.append(metrics['metrics']['macro_f1'])
             
             avg_in_domain_f1 = sum(in_domain_f1) / len(in_domain_f1) if in_domain_f1 else 0
             
@@ -395,7 +395,7 @@ class EvaluationPipeline:
             if 'cross_domain' in results:
                 for (source, target), metrics_data in results['cross_domain'].items():
                     if source != target:
-                        cross_domain_f1.append(metrics_data['metrics']['f1'])            
+                        cross_domain_f1.append(metrics_data['metrics']['macro_f1'])            
             avg_cross_domain_f1 = sum(cross_domain_f1) / len(cross_domain_f1) if cross_domain_f1 else 0
             
             model_summary = {
@@ -409,7 +409,7 @@ class EvaluationPipeline:
                 for domain, levels in results['perturbation'].items():
                     for level in ['low', 'medium', 'high']:
                         if level in levels:
-                            perturbation_f1.append(levels[level]['metrics']['f1'])
+                            perturbation_f1.append(levels[level]['metrics']['macro_f1'])
                 
                 model_summary['avg_perturbation_f1'] = sum(perturbation_f1) / len(perturbation_f1) if perturbation_f1 else 0
             
@@ -424,10 +424,10 @@ class EvaluationPipeline:
         logger.info("\nEvaluation Summary:")
         for model_name, metrics in summary['model_summaries'].items():
             logger.info(f"  {model_name.upper()}:")
-            logger.info(f"    Avg In-Domain F1: {metrics['avg_in_domain_f1']:.4f}")
-            logger.info(f"    Avg Cross-Domain F1: {metrics['avg_cross_domain_f1']:.4f}")
+            logger.info(f"    Avg In-Domain Macro-F1: {metrics['avg_in_domain_f1']:.4f}")
+            logger.info(f"    Avg Cross-Domain Macro-F1: {metrics['avg_cross_domain_f1']:.4f}")
             if 'avg_perturbation_f1' in metrics:
-                logger.info(f"    Avg Perturbation F1: {metrics['avg_perturbation_f1']:.4f}")
+                logger.info(f"    Avg Perturbation Macro-F1: {metrics['avg_perturbation_f1']:.4f}")
         
         return summary
     
