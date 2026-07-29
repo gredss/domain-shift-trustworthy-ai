@@ -42,6 +42,7 @@ from perturbation_engine import PerturbationEngine
 from statistical_analyzer import StatisticalAnalyzer
 from error_analyzer import ErrorAnalyzer, attach_texts_to_results
 from utils import file_manager, reproducibility, Timer, get_timestamp
+import debug_logger
 
 logging.basicConfig(
     level=logging.INFO,
@@ -531,6 +532,11 @@ def parse_arguments():
         '--seed', type=int, default=42,
         help='Random seed for reproducibility (default: 42)'
     )
+    parser.add_argument(
+        '--debug', action='store_true',
+        help='Enable comprehensive debug logging for all pipeline stages '
+             '(also enabled via DEBUG_PIPELINE=1 env var)'
+    )
     
     return parser.parse_args()
 
@@ -539,6 +545,11 @@ def main():
     """Main entry point."""
     try:
         args = parse_arguments()
+
+        # ── activate debug logging if requested ────────────────────────────
+        if args.debug:
+            debug_logger.set_debug(True)
+            logger.info("[debug_logger] Debug output ENABLED for this run")
         
         pipeline = EvaluationPipeline(
             checkpoint_dir=args.checkpoint_dir,

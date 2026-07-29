@@ -40,6 +40,12 @@ logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+from debug_logger import (
+    dbg_error_input,
+    dbg_error_attribution,
+    dbg_error_summary,
+)
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # PATTERN CATALOGUE  (Indonesian-specific)
@@ -349,6 +355,14 @@ class ErrorAnalyzer:
         error_indices   = [i for i in range(n) if labels[i] != preds[i]]
         correct_indices = [i for i in range(n) if labels[i] == preds[i]]
 
+        # ── debug: error analysis input ────────────────────────────────────
+        dbg_error_input(
+            context=f"domain={domain}",
+            n_total=n,
+            n_errors=len(error_indices),
+            texts_sample=[texts[i] for i in error_indices[:3]],
+        )
+
         # Pattern presence rates in errors vs correct
         def _rate(indices: List[int], pattern: str) -> float:
             if not indices:
@@ -381,7 +395,7 @@ class ErrorAnalyzer:
                         "error_type": error_type,
                     })
 
-        return {
+        result = {
             "n_total":              n,
             "n_errors":             len(error_indices),
             "error_rate":           len(error_indices) / n if n > 0 else 0.0,
@@ -390,6 +404,14 @@ class ErrorAnalyzer:
             "pattern_attribution":  pattern_attribution,
             "examples":             examples,
         }
+
+        # ── debug: pattern attribution output ─────────────────────────────
+        dbg_error_attribution(
+            context=f"domain={domain}",
+            attribution=pattern_attribution,
+        )
+
+        return result
 
     # ── global summary ────────────────────────────────────────────────────────
 
@@ -419,11 +441,19 @@ class ErrorAnalyzer:
         }
         ranked = sorted(mean_attr.items(), key=lambda x: x[1], reverse=True)
 
-        return {
+        summary = {
             "mean_pattern_attribution": mean_attr,
             "ranked_error_drivers":     [p for p, _ in ranked],
             "top_driver":               ranked[0][0] if ranked else None,
         }
+
+        # ── debug: global summary ──────────────────────────────────────────
+        dbg_error_summary(
+            top_driver=summary["top_driver"],
+            ranked=summary["ranked_error_drivers"],
+        )
+
+        return summary
 
     # ── text recovery (graceful fallback) ─────────────────────────────────────
 

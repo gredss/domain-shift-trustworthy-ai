@@ -15,6 +15,11 @@ import pandas as pd
 import numpy as np
 import logging
 
+from debug_logger import (
+    dbg_perturbation_samples,
+    dbg_perturbation_stats,
+)
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -100,9 +105,35 @@ class PerturbationEngine:
         """
         logger.info(f"Applying {level}-level perturbations to {len(df)} texts")
         
+        original_texts = df[text_column].tolist()
         perturbed_df = df.copy()
         perturbed_df[text_column] = perturbed_df[text_column].apply(
             lambda x: self.apply_perturbation(x, level, intensity)
+        )
+        perturbed_texts = perturbed_df[text_column].tolist()
+
+        # ── debug: show sample before/after pairs ─────────────────────────
+        dbg_perturbation_samples(
+            level=level,
+            domain="dataframe",
+            originals=original_texts,
+            perturbed=perturbed_texts,
+        )
+        # ── debug: aggregate change statistics ────────────────────────────
+        char_changes = [
+            sum(1 for a, b in zip(o, p) if a != b) / max(len(o), 1)
+            for o, p in zip(original_texts, perturbed_texts)
+        ]
+        word_changes = [
+            len(set(o.split()).symmetric_difference(set(p.split()))) / max(len(o.split()), 1)
+            for o, p in zip(original_texts, perturbed_texts)
+        ]
+        dbg_perturbation_stats(
+            level=level,
+            domain="dataframe",
+            n_texts=len(perturbed_df),
+            char_change_mean=float(np.mean(char_changes)) if char_changes else 0.0,
+            word_change_mean=float(np.mean(word_changes)) if word_changes else 0.0,
         )
         
         logger.info("Perturbation complete")

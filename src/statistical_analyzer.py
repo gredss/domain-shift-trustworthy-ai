@@ -14,6 +14,15 @@ import logging
 import json
 import os
 
+from debug_logger import (
+    dbg_stats_input,
+    dbg_stats_bayesian,
+    dbg_stats_rope,
+    dbg_stats_bootstrap,
+    dbg_stats_significance,
+    dbg_stats_robustness_input,
+)
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -87,6 +96,13 @@ class BayesianTester:
                 'conclusion': 'Models are equivalent (no differences detected)'
             }
         
+        # ── debug: raw score arrays going into the test ────────────────────
+        dbg_stats_input(
+            context="bayesian_signed_rank",
+            scores_a=scores_a,
+            scores_b=scores_b,
+        )
+
         # Perform Wilcoxon test
         statistic, p_value = wilcoxon(non_zero_diffs, alternative='two-sided')
         
@@ -135,6 +151,9 @@ class BayesianTester:
         }
         
         logger.info(f"Test complete: {interpretation}")
+
+        # ── debug: full test results ───────────────────────────────────────
+        dbg_stats_bayesian(results)
         
         return results
     
@@ -245,6 +264,15 @@ class ROPEAnalyzer:
             rope = self.rope_threshold
         
         logger.info("Performing ROPE analysis")
+
+        # ── debug: input differences ───────────────────────────────────────
+        dbg_stats_input(
+            context="rope_analysis",
+            scores_a=differences,
+            scores_b=np.zeros_like(differences),
+            label_a="differences",
+            label_b="zero_baseline",
+        )
         
         mean_diff = np.mean(differences)
         std_diff = np.std(differences)
@@ -292,6 +320,9 @@ class ROPEAnalyzer:
         }
         
         logger.info(f"ROPE analysis complete: {decision}")
+
+        # ── debug: ROPE decision ───────────────────────────────────────────
+        dbg_stats_rope(results)
         
         return results
     
@@ -390,6 +421,13 @@ class SignificanceTester:
             Dictionary with test results
         """
         logger.info("Performing paired t-test")
+
+        # ── debug: raw input scores ────────────────────────────────────────
+        dbg_stats_input(
+            context="paired_t_test",
+            scores_a=scores_a,
+            scores_b=scores_b,
+        )
         
         statistic, p_value = stats.ttest_rel(scores_a, scores_b)
         
@@ -411,6 +449,9 @@ class SignificanceTester:
         }
         
         logger.info(f"Paired t-test: p={p_value:.4f}, significant={is_significant}")
+
+        # ── debug: test output ─────────────────────────────────────────────
+        dbg_stats_significance("paired_t_test", results)
         
         return results
     
@@ -430,6 +471,13 @@ class SignificanceTester:
             Dictionary with test results
         """
         logger.info("Performing Mann-Whitney U test")
+
+        # ── debug: raw input scores ────────────────────────────────────────
+        dbg_stats_input(
+            context="mann_whitney_u",
+            scores_a=scores_a,
+            scores_b=scores_b,
+        )
         
         statistic, p_value = mannwhitneyu(
             scores_a,
@@ -455,6 +503,9 @@ class SignificanceTester:
         }
         
         logger.info(f"Mann-Whitney U test: p={p_value:.4f}, significant={is_significant}")
+
+        # ── debug: test output ─────────────────────────────────────────────
+        dbg_stats_significance("mann_whitney_u", results)
         
         return results
     
@@ -478,6 +529,15 @@ class SignificanceTester:
             Dictionary with bootstrap results
         """
         logger.info(f"Calculating bootstrap CI with {n_bootstrap} samples")
+
+        # ── debug: input data distribution ────────────────────────────────
+        dbg_stats_input(
+            context="bootstrap_ci",
+            scores_a=data,
+            scores_b=np.zeros_like(data),
+            label_a="data",
+            label_b="zero_baseline",
+        )
         
         bootstrap_statistics = []
         
@@ -510,6 +570,9 @@ class SignificanceTester:
         }
         
         logger.info(f"Bootstrap CI: [{ci_lower:.4f}, {ci_upper:.4f}]")
+
+        # ── debug: bootstrap output ────────────────────────────────────────
+        dbg_stats_bootstrap(results)
         
         return results
 
@@ -710,6 +773,13 @@ class StatisticalAnalyzer:
             Dictionary with robustness analysis results
         """
         logger.info(f"Analyzing robustness for {model_name}")
+
+        # ── debug: input score distributions ──────────────────────────────
+        dbg_stats_robustness_input(
+            model_name=model_name,
+            clean_scores=clean_scores,
+            perturbed_dict=perturbed_scores_dict,
+        )
         
         results = {
             'model_name': model_name,

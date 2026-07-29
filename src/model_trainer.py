@@ -32,6 +32,17 @@ from sklearn.metrics import (
     precision_recall_fscore_support
 )
 
+from debug_logger import (
+    dbg_dataset_created,
+    dbg_tokenizer_samples,
+    dbg_trainer_init,
+    dbg_trainer_batch,
+    dbg_trainer_epoch_end,
+    dbg_trainer_predict_start,
+    dbg_trainer_predict_batch,
+    dbg_trainer_predict_done,
+)
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -46,7 +57,8 @@ class ClickbaitDataset(Dataset):
         texts: List[str],
         labels: List[int],
         tokenizer: AutoTokenizer,
-        max_length: int = 128
+        max_length: int = 128,
+        split_name: str = ""
     ):
         """
         Initialize the dataset.
@@ -56,11 +68,27 @@ class ClickbaitDataset(Dataset):
             labels: List of binary labels (0 or 1)
             tokenizer: Tokenizer for text preprocessing
             max_length: Maximum sequence length
+            split_name: Optional label for debug output (e.g. 'train', 'val')
         """
         self.texts = texts
         self.labels = labels
         self.tokenizer = tokenizer
         self.max_length = max_length
+
+        # ── debug: dataset stats ───────────────────────────────────────────
+        n_clickbait = sum(1 for l in labels if l == 1)
+        dbg_dataset_created(
+            split_name=split_name,
+            n_samples=len(texts),
+            n_clickbait=n_clickbait,
+        )
+        # ── debug: sample tokenisations ───────────────────────────────────
+        dbg_tokenizer_samples(
+            tokenizer=tokenizer,
+            texts=texts,
+            labels=labels,
+            max_length=max_length,
+        )
     
     def __len__(self) -> int:
         return len(self.texts)
@@ -244,6 +272,16 @@ class ModelTrainer:
         self.training_history = []
         
         logger.info(f"ModelTrainer initialized for {model_name}")
+        # ── debug: trainer init summary ────────────────────────────────────
+        # dropout_rate is not known at __init__ time (set during initialize_model);
+        # we emit a placeholder here and log the actual value in initialize_model.
+        dbg_trainer_init(
+            model_name=model_name,
+            device=str(self.device),
+            max_length=max_length,
+            num_labels=num_labels,
+            dropout_rate=0.0,  # actual value logged in initialize_model()
+        )
     
     def _set_seed(self, seed: int) -> None:
         """Set random seeds for reproducibility."""
@@ -265,6 +303,14 @@ class ModelTrainer:
         )
         self.model.to(self.device)
         logger.info("Model initialized and moved to device")
+        # ── debug: actual dropout used ─────────────────────────────────────
+        dbg_trainer_init(
+            model_name=self.model_name,
+            device=str(self.device),
+            max_length=self.max_length,
+            num_labels=self.num_labels,
+            dropout_rate=dropout_rate,
+        )
     
     def prepare_data_loaders(
         self,
@@ -287,14 +333,16 @@ class ModelTrainer:
             texts=train_df['text'].tolist(),
             labels=train_df['label'].tolist(),
             tokenizer=self.tokenizer,
-            max_length=self.max_length
+            max_length=self.max_length,
+            split_name="train",
         )
         
         val_dataset = ClickbaitDataset(
             texts=val_df['text'].tolist(),
             labels=val_df['label'].tolist(),
             tokenizer=self.tokenizer,
-            max_length=self.max_length
+            max_length=self.max_length,
+            split_name="val",
         )
         
         train_loader = DataLoader(
@@ -376,7 +424,7 @@ class ModelTrainer:
         loss_fn = nn.CrossEntropyLoss()
         progress_bar = tqdm(train_loader, desc=f"Epoch {epoch}")
 
-        for batch in progress_bar:
+        for batch_idx, batch in enumerate(progress_bar):
             # Move batch to device
             input_ids = batch['input_ids'].to(self.device)
             attention_mask = batch['attention_mask'].to(self.device)
@@ -410,14 +458,24 @@ class ModelTrainer:
                 'loss': loss.item(),
                 'acc': correct_predictions / total_samples
             })
+
+            # ── debug: batch-level model inputs and outputs ────────────────
+            dbg_trainer_batch(
+                batch_idx=batch_idx,
+                input_ids_shape=tuple(input_ids.shape),
+                labels=labels.cpu(),
+                logits=logits.detach().cpu(),
+                loss=loss.item(),
+            )
         
         avg_loss = total_loss / len(train_loader)
         accuracy = correct_predictions / total_samples
+
+        train_metrics = {'loss': avg_loss, 'accuracy': accuracy}
+        # ── debug: epoch training summary ─────────────────────────────────
+        dbg_trainer_epoch_end(epoch=epoch, phase="train", metrics=train_metrics)
         
-        return {
-            'loss': avg_loss,
-            'accuracy': accuracy
-        }
+        return train_metrics
     
     def evaluate(
         self,
@@ -470,7 +528,7 @@ class ModelTrainer:
 
         avg_loss = total_loss / len(val_loader)
 
-        return {
+        val_metrics = {
           'loss': avg_loss,
           'accuracy': accuracy,
 
@@ -487,6 +545,9 @@ class ModelTrainer:
           # macro
           'macro_f1': macro_f1
         }
+        # ── debug: validation epoch summary ───────────────────────────────
+        dbg_trainer_epoch_end(epoch=0, phase="val", metrics=val_metrics)
+        return val_metrics
     
     def train(
         self,
@@ -735,6 +796,9 @@ class ModelTrainer:
             raise RuntimeError("Model not initialized or loaded")
         
         self.model.eval()
+
+        # ── debug: predict call summary ────────────────────────────────────
+        dbg_trainer_predict_start(n_texts=len(texts), batch_size=batch_size)
         
         # Create dummy labels for dataset
         dummy_labels = [0] * len(texts)
@@ -742,7 +806,8 @@ class ModelTrainer:
             texts=texts,
             labels=dummy_labels,
             tokenizer=self.tokenizer,
-            max_length=self.max_length
+            max_length=self.max_length,
+            split_name="predict",
         )
         
         loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
@@ -751,7 +816,7 @@ class ModelTrainer:
         all_probabilities = []
         
         with torch.no_grad():
-            for batch in tqdm(loader, desc="Predicting"):
+            for batch_idx, batch in enumerate(tqdm(loader, desc="Predicting")):
                 input_ids = batch['input_ids'].to(self.device)
                 attention_mask = batch['attention_mask'].to(self.device)
                 
@@ -759,10 +824,28 @@ class ModelTrainer:
                 probabilities = torch.softmax(logits, dim=1)
                 predictions = torch.argmax(logits, dim=1)
                 
+                # ── debug: raw logits + predictions ───────────────────────
+                dbg_trainer_predict_batch(
+                    batch_idx=batch_idx,
+                    logits=logits.cpu(),
+                    preds=predictions.cpu(),
+                    probs=probabilities.cpu(),
+                )
+
                 all_predictions.extend(predictions.cpu().numpy())
                 all_probabilities.extend(probabilities.cpu().numpy())
+
+        all_preds_arr = np.array(all_predictions)
+        all_probs_arr = np.array(all_probabilities)
+
+        # ── debug: predict done ────────────────────────────────────────────
+        from collections import Counter
+        dbg_trainer_predict_done(
+            n_preds=len(all_preds_arr),
+            label_counts=dict(Counter(all_preds_arr.tolist())),
+        )
         
-        return np.array(all_predictions), np.array(all_probabilities)
+        return all_preds_arr, all_probs_arr
 
 
 class HyperparameterSearch:

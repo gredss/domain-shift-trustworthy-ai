@@ -13,6 +13,15 @@ from sklearn.model_selection import train_test_split
 from transformers import AutoTokenizer
 import logging
 
+from debug_logger import (
+    dbg_data_csv_loaded,
+    dbg_data_combined,
+    dbg_data_validation,
+    dbg_data_split,
+    dbg_data_sample_texts,
+    dbg_tokenizer_samples,
+)
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -149,6 +158,14 @@ class DataManager:
             
             dataframes.append(df)
             logger.info(f"Loaded {len(df)} samples from {os.path.basename(path)} (domain: {domain})")
+
+            # ── debug: per-CSV summary ─────────────────────────────────────
+            dbg_data_csv_loaded(
+                domain=domain,
+                path=path,
+                n_rows=len(df),
+                label_counts=df['label'].value_counts().to_dict(),
+            )
         
         self.raw_data = pd.concat(dataframes, ignore_index=True)
         self.domains = sorted(self.raw_data['domain'].unique().tolist())
@@ -156,6 +173,13 @@ class DataManager:
         logger.info(f"Total samples loaded: {len(self.raw_data)}")
         logger.info(f"Domains identified: {self.domains}")
         logger.info(f"Label distribution: {self.raw_data['label'].value_counts().to_dict()}")
+
+        # ── debug: combined dataset summary ───────────────────────────────
+        dbg_data_combined(
+            n_total=len(self.raw_data),
+            domains=self.domains,
+            label_counts=self.raw_data['label'].value_counts().to_dict(),
+        )
         
         return self.raw_data
     
@@ -185,6 +209,16 @@ class DataManager:
         
         if not df['Label'].isin([0, 1]).all():
             raise ValueError(f"Labels must be binary (0 or 1) in {source}")
+
+        # ── debug: data-quality issues ─────────────────────────────────────
+        domain_guess = os.path.splitext(os.path.basename(source))[0].capitalize()
+        issues = {
+            'null_titles':      int(df['title'].isnull().sum()),
+            'short_titles':     int((df['title'].str.len() < 10).sum()),
+            'long_titles':      int((df['title'].str.len() > 500).sum()),
+            'duplicate_titles': int(df['title'].duplicated().sum()),
+        }
+        dbg_data_validation(domain=domain_guess, issues=issues)
     
     def stratified_split_by_domain( #NEW
         self,
@@ -212,7 +246,7 @@ class DataManager:
             train_val_df, test_df = train_test_split(
                 domain_df,
                 test_size=test_size,
-                stratify=domain_df['label'], 
+                stratify=domain_df['label'],
                 random_state=self.random_seed
             )
             
@@ -230,6 +264,22 @@ class DataManager:
             }
             
             logger.info(f"  {domain} Split -> Train: {len(train_df)}, Val: {len(val_df)}, Test: {len(test_df)}")
+
+            # ── debug: split sizes + class distribution ────────────────────
+            dbg_data_split(
+                domain=domain,
+                n_train=len(train_df),
+                n_val=len(val_df),
+                n_test=len(test_df),
+                train_dist=train_df['label'].value_counts().to_dict(),
+                val_dist=val_df['label'].value_counts().to_dict(),
+                test_dist=test_df['label'].value_counts().to_dict(),
+            )
+            dbg_data_sample_texts(
+                split_name=f"{domain}/train",
+                texts=train_df['text'].tolist(),
+                labels=train_df['label'].tolist(),
+            )
             
         return domain_splits
 
@@ -315,6 +365,15 @@ class DataManager:
             raise RuntimeError("Tokenizer not initialized. Call initialize_tokenizer() first.")
         
         logger.info(f"Preprocessing {len(texts)} texts")
+
+        # ── debug: show sample tokenisations before batch encoding ─────────
+        dummy_labels = [0] * len(texts)
+        dbg_tokenizer_samples(
+            tokenizer=self.tokenizer,
+            texts=texts,
+            labels=dummy_labels,
+            max_length=self.max_length,
+        )
         
         encodings = self.tokenizer(
             texts,

@@ -22,6 +22,17 @@ from sklearn.metrics import (
 from datetime import datetime
 import logging
 
+from debug_logger import (
+    dbg_eval_in_domain,
+    dbg_eval_cross_domain,
+    dbg_eval_confusion_matrix,
+    dbg_eval_domain_shift,
+    dbg_perturbation_samples,
+    dbg_perturbation_stats,
+    dbg_perturbation_metrics,
+    dbg_perturbation_robustness,
+)
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -264,10 +275,22 @@ class InDomainEvaluator:
         }
         
         logger.info(
-			f"In-domain Macro-F1={metrics['macro_f1']:.4f} | "
-			f"F1_0={metrics['f1_0']:.4f} | "
-			f"F1_1={metrics['f1_1']:.4f}"
-		)
+   f"In-domain Macro-F1={metrics['macro_f1']:.4f} | "
+   f"F1_0={metrics['f1_0']:.4f} | "
+   f"F1_1={metrics['f1_1']:.4f}"
+  )
+
+        # ── debug: in-domain metrics + confusion matrix ────────────────────
+        dbg_eval_in_domain(
+            domain=domain or "?",
+            n_samples=len(test_df),
+            metrics=metrics,
+        )
+        if metrics.get('confusion_matrix'):
+            dbg_eval_confusion_matrix(
+                context=f"in-domain/{domain}",
+                cm=metrics['confusion_matrix'],
+            )
         
         return results
     
@@ -340,6 +363,19 @@ class CrossDomainEvaluator:
         
         # Calculate metrics
         metrics = self.metrics_calculator.calculate_metrics(y_true, y_pred, y_proba)
+
+        # ── debug: cross-domain metrics + confusion matrix ─────────────────
+        dbg_eval_cross_domain(
+            source=source_domain,
+            target=target_domain,
+            n_samples=len(target_test_df),
+            metrics=metrics,
+        )
+        if metrics.get('confusion_matrix'):
+            dbg_eval_confusion_matrix(
+                context=f"cross-domain/{source_domain}->{target_domain}",
+                cm=metrics['confusion_matrix'],
+            )
         
         return {
             'source_domain': source_domain,
@@ -463,10 +499,37 @@ class PerturbationEvaluator:
         )
         
         # Apply perturbations
+        original_texts = test_df['text'].tolist()
         perturbed_df = self.perturbation_engine.apply_to_dataframe(
             test_df.copy(),
             text_column='text',
             level=perturbation_level
+        )
+        perturbed_texts = perturbed_df['text'].tolist()
+
+        # ── debug: perturbation sample pairs ──────────────────────────────
+        dbg_perturbation_samples(
+            level=perturbation_level,
+            domain=domain or "?",
+            originals=original_texts,
+            perturbed=perturbed_texts,
+        )
+        # ── debug: perturbation character/word change stats ────────────────
+        import numpy as _np
+        char_changes = [
+            sum(1 for a, b in zip(o, p) if a != b) / max(len(o), 1)
+            for o, p in zip(original_texts, perturbed_texts)
+        ]
+        word_changes = [
+            len(set(o.split()).symmetric_difference(set(p.split()))) / max(len(o.split()), 1)
+            for o, p in zip(original_texts, perturbed_texts)
+        ]
+        dbg_perturbation_stats(
+            level=perturbation_level,
+            domain=domain or "?",
+            n_texts=len(perturbed_df),
+            char_change_mean=float(_np.mean(char_changes)) if char_changes else 0.0,
+            word_change_mean=float(_np.mean(word_changes)) if word_changes else 0.0,
         )
         
         # Get predictions
@@ -475,6 +538,13 @@ class PerturbationEvaluator:
         
         # Calculate metrics
         metrics = self.metrics_calculator.calculate_metrics(y_true, y_pred, y_proba)
+
+        # ── debug: metrics after perturbation ─────────────────────────────
+        dbg_perturbation_metrics(
+            level=perturbation_level,
+            domain=domain or "?",
+            metrics=metrics,
+        )
         
         results = {
             'domain': domain,
@@ -522,6 +592,13 @@ class PerturbationEvaluator:
                 results[level]['metrics']
             )
             results[level]['robustness_metrics'] = robustness
+
+            # ── debug: robustness drop metrics ────────────────────────────
+            dbg_perturbation_robustness(
+                level=level,
+                domain=domain or "?",
+                rob=robustness,
+            )
         
         return results
 
@@ -612,6 +689,13 @@ class EvaluationEngine:
                         target_in_domain
                     )
                     cross_results['domain_shift'] = shift
+
+                    # ── debug: domain shift values ─────────────────────────
+                    dbg_eval_domain_shift(
+                        source=source,
+                        target=target,
+                        shift=shift,
+                    )
                 else:
                     logger.warning(f"Missing in-domain data for shift calculation: {source} -> {target}")
         

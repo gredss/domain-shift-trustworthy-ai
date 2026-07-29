@@ -15,6 +15,7 @@ This repository provides a robustness evaluation framework for Indonesian clickb
 - **Error Analysis:** Linguistic pattern breakdown explaining *why* performance drops (sensational wording, numerical claims, rhetorical questions, named entities, domain jargon)
 - **Statistical Validation:** Bayesian signed-rank test with ROPE analysis, bootstrap confidence intervals, and paired/non-parametric significance tests
 - **Interactive Dashboard:** Streamlit interface for real-time predictions, cross-domain heatmaps, degradation curves, and automated reliability reports
+- **Pipeline Debug Logging:** Comprehensive, structured observability for every processing stage — enable with a single flag, zero cost when off
 
 ## Project Structure
 
@@ -40,6 +41,7 @@ domain-shift-trustworthy-ai/
 │   ├── error_analyzer.py            # Linguistic error pattern analysis for misclassifications
 │   ├── print_evaluation_summary.py  # Pretty-print evaluation results to console / plots
 │   ├── dashboard_app.py             # Interactive Streamlit dashboard
+│   ├── debug_logger.py              # Configurable debug observability for all pipeline stages
 │   ├── train_pipeline.py            # Training orchestration script (CLI)
 │   ├── evaluate_pipeline.py         # Evaluation orchestration script (CLI)
 │   ├── utils.py                     # Shared helper functions
@@ -171,6 +173,41 @@ cd src
 python -m pytest test_suite.py -v
 ```
 
+## Debug Logging
+
+Every major processing stage emits structured, human-readable debug output that can be enabled without touching any pipeline logic. All debug calls are no-ops by default — zero performance impact on normal runs.
+
+### Activation
+
+```bash
+# Environment variable (works everywhere, no code changes)
+DEBUG_PIPELINE=1 python src/train_pipeline.py --model base
+DEBUG_PIPELINE=1 python src/evaluate_pipeline.py --model base
+
+# CLI flag
+python src/train_pipeline.py --model base --debug
+python src/evaluate_pipeline.py --model base --debug
+
+# Programmatic (e.g. notebook)
+from debug_logger import set_debug
+set_debug(True)
+```
+
+### What gets logged
+
+Each stage is identified by a bracketed header so output can be grepped by stage:
+
+| Header | Stage | Logged information |
+|---|---|---|
+| `[DataManager]` | CSV loading & splitting | Raw row counts and label distributions per file; combined dataset summary; data-quality issues (nulls, duplicates, length outliers); per-domain split sizes and class distributions; 3 representative sample texts per split |
+| `[Tokenizer]` | Text tokenisation | Token IDs, attention mask, real vs. padded token counts, and decoded token string for 2 example texts |
+| `[ClickbaitDataset]` | Dataset construction | Total samples, clickbait ratio, and tokenisation samples at the point a `ClickbaitDataset` is created |
+| `[ModelTrainer]` | Training & inference | Model init parameters (device, max length, dropout); every 50th batch: input shape, raw logits, predicted labels, and loss; per-epoch train and validation metrics; predict call summary, per-batch logits/predictions, and final label counts |
+| `[Evaluation]` | In-domain & cross-domain | Full metric dict (accuracy, precision, recall, F1, MCC, ROC-AUC) per domain; confusion matrix; Source Drop and Target Drop domain-shift values |
+| `[Perturbation]` | Text perturbation | 3 before/after text pairs per level and domain; mean character and word change ratios; per-level metrics; absolute and relative robustness drop |
+| `[Statistics]` | Statistical tests | Input score arrays (mean, std, range) for both models; Bayesian signed-rank output (p-value, effect size, credible interval, ROPE decision); ROPE analysis (probability in ROPE, all credible interval levels); bootstrap CI; paired t-test and Mann-Whitney U results |
+| `[ErrorAnalysis]` | Linguistic error patterns | Error count and rate per condition; pattern attribution ranked from highest to lowest driver; top global error driver |
+
 ## Module Reference
 
 | Module | Responsibility |
@@ -182,6 +219,7 @@ python -m pytest test_suite.py -v
 | `evaluation_engine.py` | Computes accuracy, precision, recall, F1, MCC, ROC-AUC; orchestrates in-domain, cross-domain, and perturbation scenarios |
 | `statistical_analyzer.py` | Bayesian signed-rank test, ROPE analysis, bootstrap CI, Wilcoxon, Mann-Whitney U, Cohen's d |
 | `error_analyzer.py` | Identifies linguistic patterns in misclassified headlines (sensational wording, numerical claims, rhetorical questions, named entities, domain jargon) |
+| `debug_logger.py` | Configurable observability layer; all hooks are no-ops unless `DEBUG_PIPELINE=1` or `--debug` is passed |
 | `print_evaluation_summary.py` | Console pretty-printer and matplotlib plots for evaluation results |
 | `dashboard_app.py` | Streamlit UI: single-text prediction, 5×5 heatmap, degradation curves, automated reliability report |
 | `train_pipeline.py` | CLI wrapper for end-to-end training |
