@@ -1,8 +1,5 @@
 # Robustness Evaluation of IndoBERT for Cross-Domain Indonesian Clickbait Detection
 
-**Authors:** Grace Esther Simanjuntak, Angela Valerie Christy, Khansa Nabilah Awali  
-**Institution:** BINUS University, Jakarta, Indonesia
-
 ## Overview
 
 This repository provides a robustness evaluation framework for Indonesian clickbait detection using IndoBERT model variants. The system fine-tunes IndoBERT on a domain-split dataset, then assesses performance under cross-domain conditions and linguistic perturbations using Bayesian statistical tests.
