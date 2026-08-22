@@ -266,7 +266,7 @@ class ModelTrainer:
         
         # Initialize components
         self.tokenizer = BertTokenizer.from_pretrained(model_name)
-		print(f"token: {type(self.tokenizer)}")
+		    print(f"token: {type(self.tokenizer)}")
         self.model = None
         self.optimizer = None
         self.scheduler = None
