@@ -5,8 +5,14 @@ This module implements three levels of text perturbations for robustness testing
 - Low-level: Character-level typos (5-10% intensity)
 - Medium-level: Informal language injection (15-25% intensity)
 - High-level: Synonym replacement and paraphrasing (40-60% intensity)
+
+Vocabulary is loaded from JSON files in ``dataset/perturbation_vocab/``.
+If a file is missing the module silently falls back to the built-in defaults,
+so the pipeline never breaks on a fresh clone without the vocab files.
 """
 
+import json
+import os
 import random
 import re
 from abc import ABC, abstractmethod
@@ -22,6 +28,63 @@ from debug_logger import (
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+
+# ── vocabulary loader ──────────────────────────────────────────────────────────
+
+def _find_vocab_dir() -> Optional[str]:
+    """
+    Locate the ``dataset/perturbation_vocab/`` directory relative to this
+    source file.  Works whether the script is run from ``src/``, from the
+    repo root, or from any other working directory.
+    """
+    src_dir = os.path.dirname(os.path.abspath(__file__))
+    # Walk up from src/ to find the dataset/ sibling
+    for base in (src_dir, os.path.dirname(src_dir)):
+        candidate = os.path.join(base, "dataset", "perturbation_vocab")
+        if os.path.isdir(candidate):
+            return candidate
+    return None
+
+
+def _load_vocab_json(filename: str, default: any) -> any:
+    """
+    Load a JSON vocabulary file from the perturbation_vocab directory.
+
+    If the directory or file does not exist, logs a warning and returns
+    *default* so the pipeline continues with the built-in fallback.
+
+    The special ``_comment`` key and section-header keys (those whose value
+    is an empty dict ``{}``) are stripped automatically.
+    """
+    vocab_dir = _find_vocab_dir()
+    if vocab_dir is None:
+        logger.warning(
+            "perturbation_vocab/ directory not found — using built-in defaults."
+        )
+        return default
+
+    filepath = os.path.join(vocab_dir, filename)
+    if not os.path.exists(filepath):
+        logger.warning(
+            f"Vocab file not found: {filepath} — using built-in defaults."
+        )
+        return default
+
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        # Strip comment / section-header keys so callers get clean data
+        if isinstance(data, dict):
+            data = {
+                k: v for k, v in data.items()
+                if not k.startswith("_") and not k.startswith("──") and v != {}
+            }
+        logger.info(f"Loaded vocab from {filepath}")
+        return data
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.warning(f"Failed to load {filepath}: {exc} — using built-in defaults.")
+        return default
 
 
 class PerturbationEngine:
@@ -353,14 +416,18 @@ class MediumLevelPerturbation(BasePerturbation):
         Uses a private random.Random instance so this class's state is
         fully isolated from the global random module and from other classes.
 
+        Vocabulary is loaded from ``dataset/perturbation_vocab/`` JSON files
+        at init time.  If a file cannot be found the built-in minimal defaults
+        are used so the pipeline never fails on a fresh environment.
+
         Args:
             random_seed: Random seed for reproducibility
         """
         self.random_seed = random_seed
         self._rng = random.Random(random_seed)
 
-        # Indonesian informal language mappings
-        self.formal_to_informal = {
+        # ── built-in minimal defaults (used when JSON file is absent) ─────
+        _default_formal_to_informal = {
             'tidak': ['gak', 'nggak', 'ga', 'ngga'],
             'apa': ['apaan', 'apa sih'],
             'saya': ['gue', 'gw', 'aku'],
@@ -393,24 +460,48 @@ class MediumLevelPerturbation(BasePerturbation):
             'sekarang': ['skrg', 'sekarang nih'],
             'nanti': ['ntar'],
             'tahu': ['tau'],
-            'banyak': ['byk', 'banyak banget']
+            'banyak': ['byk', 'banyak banget'],
         }
-        
-        # Common Indonesian slang additions
-        self.slang_additions = [
+        _default_slang_particles = [
             'sih', 'nih', 'dong', 'deh', 'lah', 'kok', 'kan'
         ]
-        
-        # Abbreviations
-        self.abbreviations = {
+        _default_abbreviations = {
             'dan': 'n',
             'di': 'd',
             'ke': 'k',
             'dari': 'dr',
-            'sama': 'sm'
+            'sama': 'sm',
         }
-        
-        logger.info("MediumLevelPerturbation initialized")
+
+        # ── load from JSON, fall back to defaults if absent ───────────────
+        loaded_f2i = _load_vocab_json(
+            "formal_to_informal.json", _default_formal_to_informal
+        )
+        # JSON values must be lists; guard against stray string values
+        self.formal_to_informal: Dict[str, List[str]] = {
+            k: (v if isinstance(v, list) else [v])
+            for k, v in loaded_f2i.items()
+        }
+
+        particles_data = _load_vocab_json(
+            "slang_particles.json",
+            {"particles": _default_slang_particles},
+        )
+        raw_particles = particles_data.get("particles", _default_slang_particles)
+        self.slang_additions: List[str] = (
+            raw_particles if isinstance(raw_particles, list) else _default_slang_particles
+        )
+
+        self.abbreviations: Dict[str, str] = _load_vocab_json(
+            "abbreviations.json", _default_abbreviations
+        )
+
+        logger.info(
+            f"MediumLevelPerturbation initialized — "
+            f"{len(self.formal_to_informal)} formal→informal entries, "
+            f"{len(self.slang_additions)} particles, "
+            f"{len(self.abbreviations)} abbreviations"
+        )
     
     def perturb(self, text: str, intensity: Optional[float] = None) -> str:
         """
@@ -433,46 +524,82 @@ class MediumLevelPerturbation(BasePerturbation):
         words = text.split()
         num_perturbations = max(1, int(len(words) * intensity))
 
-        # Randomly select words to perturb
-        perturb_indices = self._rng.sample(range(len(words)), min(num_perturbations, len(words)))
-        
+        # Prefer content words (length > 2, not purely numeric/symbolic).
+        # This avoids wasting perturbation budget on tokens like "1", "Rp",
+        # "&" which cannot be meaningfully informalized.
+        content_indices = [
+            i for i, w in enumerate(words)
+            if len(re.sub(r'[^\w]', '', w)) > 2
+            and not re.sub(r'[^\w]', '', w).isdigit()
+        ]
+        # Fall back to all positions if not enough content words available
+        candidate_pool = content_indices if len(content_indices) >= num_perturbations else list(range(len(words)))
+        perturb_indices = self._rng.sample(candidate_pool, min(num_perturbations, len(candidate_pool)))
+
         for idx in perturb_indices:
             words[idx] = self._informalize_word(words[idx])
-        
+
         return ' '.join(words)
     
     def _informalize_word(self, word: str) -> str:
         """
         Convert a word to informal Indonesian.
-        
+
+        Priority order:
+          1. Exact match in formal_to_informal mapping (highest confidence)
+          2. Exact match in abbreviations dict (50% chance to abbreviate)
+          3. Append a slang particle to the word (70% chance — raised from
+             the previous 30% so that out-of-vocabulary news nouns/verbs are
+             reliably perturbed rather than silently passed through unchanged)
+          4. Drop one interior character as a last-resort OOV fallback
+             (50% chance, only for words longer than 4 characters)
+
         Args:
             word: Word to informalize
-            
+
         Returns:
-            Informalized word
+            Informalized word (guaranteed to differ from input on paths 1–4
+            when the word has enough characters)
         """
         word_lower = word.lower()
-        
+
         # Remove punctuation for matching
         word_clean = re.sub(r'[^\w\s]', '', word_lower)
-        
-        # Try formal to informal mapping
+
+        # 1. Formal → informal mapping
         if word_clean in self.formal_to_informal:
             informal = self._rng.choice(self.formal_to_informal[word_clean])
-            # Preserve original punctuation
-            if word != word_lower:
-                return word.replace(word_clean, informal)
-            return informal
+            # Preserve capitalisation: if the original word started with an
+            # uppercase letter, capitalise the replacement too.
+            # NOTE: do NOT use word.replace(word_clean, informal) here —
+            # that fails when the word has a leading capital (e.g. "Pemerintah"
+            # does not contain the lowercase substring "pemerintah").
+            # Preserve any trailing punctuation (e.g. comma, period).
+            trailing = ''.join(c for c in word if not c.isalnum() and c not in ("'", "\u2019"))
+            if word[0].isupper():
+                informal = informal.capitalize()
+            return informal + trailing
 
-        # Try abbreviation
+        # 2. Abbreviation (50% chance)
         if word_clean in self.abbreviations and self._rng.random() < 0.5:
             return self.abbreviations[word_clean]
 
-        # Add slang particle
-        if len(word_clean) > 3 and self._rng.random() < 0.3:
+        # 3. Slang particle appended — raised to 70% so OOV news words
+        #    (names, tech terms, domain nouns) reliably get perturbed
+        if len(word_clean) > 3 and self._rng.random() < 0.7:
             particle = self._rng.choice(self.slang_additions)
             return f"{word} {particle}"
-        
+
+        # 4. Guaranteed OOV fallback: drop one interior character.
+        #    No probability gate — if all three paths above missed, this
+        #    ensures the word is *always* changed so medium perturbation
+        #    never silently passes through a content word unchanged.
+        #    Threshold ≥ 3 (was > 3) so tokens like "17T" (len=3) are
+        #    also covered — randint(1, len-2) requires len >= 3.
+        if len(word_clean) >= 3 and len(word) >= 3:
+            drop_idx = self._rng.randint(1, len(word) - 2)
+            return word[:drop_idx] + word[drop_idx + 1:]
+
         return word
 
 
@@ -489,60 +616,78 @@ class HighLevelPerturbation(BasePerturbation):
         Uses a private random.Random instance so this class's state is
         fully isolated from the global random module and from other classes.
 
+        Vocabulary is loaded from ``dataset/perturbation_vocab/synonyms.json``
+        at init time.  If the file is absent the built-in adjective-only
+        defaults are used so the pipeline never fails.
+
         Args:
             random_seed: Random seed for reproducibility
         """
         self.random_seed = random_seed
         self._rng = random.Random(random_seed)
-        
-        # Indonesian synonym dictionary
-        self.synonyms = {
-            'besar': ['besar', 'raksasa', 'jumbo', 'gede', 'luas'],
-            'kecil': ['kecil', 'mungil', 'mini', 'cilik'],
-            'bagus': ['bagus', 'baik', 'oke', 'mantap', 'keren'],
-            'buruk': ['buruk', 'jelek', 'tidak baik', 'payah'],
-            'cepat': ['cepat', 'kilat', 'gesit', 'laju'],
-            'lambat': ['lambat', 'pelan', 'lelet'],
-            'tinggi': ['tinggi', 'jangkung', 'menjulang'],
-            'rendah': ['rendah', 'pendek'],
-            'penting': ['penting', 'krusial', 'vital', 'esensial'],
-            'mudah': ['mudah', 'gampang', 'simpel'],
-            'sulit': ['sulit', 'susah', 'rumit', 'kompleks'],
-            'baru': ['baru', 'anyar', 'fresh'],
-            'lama': ['lama', 'lawas', 'usang'],
-            'menarik': ['menarik', 'seru', 'asyik', 'keren'],
-            'membosankan': ['membosankan', 'ngebosenin', 'monoton'],
-            'senang': ['senang', 'gembira', 'bahagia', 'happy'],
-            'sedih': ['sedih', 'duka', 'galau'],
-            'marah': ['marah', 'kesal', 'jengkel', 'dongkol'],
-            'takut': ['takut', 'ngeri', 'seram'],
-            'berani': ['berani', 'pemberani', 'gagah'],
-            'pintar': ['pintar', 'cerdas', 'pandai', 'jenius'],
-            'bodoh': ['bodoh', 'dungu', 'tolol'],
-            'cantik': ['cantik', 'indah', 'ayu', 'elok'],
-            'jelek': ['jelek', 'buruk rupa'],
-            'kaya': ['kaya', 'tajir', 'berada', 'mampu'],
-            'miskin': ['miskin', 'papa', 'melarat'],
-            'ramai': ['ramai', 'rame', 'hiruk pikuk'],
-            'sepi': ['sepi', 'sunyi', 'lengang'],
-            'panas': ['panas', 'gerah', 'hangat'],
-            'dingin': ['dingin', 'sejuk', 'adem'],
-            'terang': ['terang', 'cerah', 'jelas'],
-            'gelap': ['gelap', 'remang', 'kelam'],
-            'keras': ['keras', 'kuat', 'solid'],
-            'lembut': ['lembut', 'halus', 'soft'],
-            'mahal': ['mahal', 'pricey', 'selangit'],
-            'murah': ['murah', 'terjangkau', 'ekonomis']
+
+        # ── built-in minimal defaults (adjectives only, used when JSON absent)
+        _default_synonyms = {
+            'besar': ['raksasa', 'jumbo', 'gede', 'luas'],
+            'kecil': ['mungil', 'mini', 'cilik'],
+            'bagus': ['baik', 'oke', 'mantap', 'keren'],
+            'buruk': ['jelek', 'tidak baik', 'payah'],
+            'cepat': ['kilat', 'gesit', 'laju'],
+            'lambat': ['pelan', 'lelet'],
+            'tinggi': ['jangkung', 'menjulang'],
+            'rendah': ['pendek'],
+            'penting': ['krusial', 'vital', 'esensial'],
+            'mudah': ['gampang', 'simpel'],
+            'sulit': ['susah', 'rumit', 'kompleks'],
+            'baru': ['anyar', 'fresh'],
+            'lama': ['lawas', 'usang'],
+            'menarik': ['seru', 'asyik', 'keren'],
+            'membosankan': ['ngebosenin', 'monoton'],
+            'senang': ['gembira', 'bahagia', 'happy'],
+            'sedih': ['duka', 'galau'],
+            'marah': ['kesal', 'jengkel', 'dongkol'],
+            'takut': ['ngeri', 'seram'],
+            'berani': ['pemberani', 'gagah'],
+            'pintar': ['cerdas', 'pandai', 'jenius'],
+            'bodoh': ['dungu', 'tolol'],
+            'cantik': ['indah', 'ayu', 'elok'],
+            'jelek': ['buruk rupa'],
+            'kaya': ['tajir', 'berada', 'mampu'],
+            'miskin': ['papa', 'melarat'],
+            'ramai': ['rame', 'hiruk pikuk'],
+            'sepi': ['sunyi', 'lengang'],
+            'panas': ['gerah', 'hangat'],
+            'dingin': ['sejuk', 'adem'],
+            'terang': ['cerah', 'jelas'],
+            'gelap': ['remang', 'kelam'],
+            'keras': ['kuat', 'solid'],
+            'lembut': ['halus', 'soft'],
+            'mahal': ['pricey', 'selangit'],
+            'murah': ['terjangkau', 'ekonomis'],
         }
-        
+
+        # ── load from JSON, fall back to defaults if absent ───────────────
+        loaded_synonyms = _load_vocab_json("synonyms.json", _default_synonyms)
+        # Ensure every value is a non-empty list and strip the key itself
+        # from the options list so we always substitute a *different* word.
+        self.synonyms: Dict[str, List[str]] = {}
+        for k, v in loaded_synonyms.items():
+            options = v if isinstance(v, list) else [v]
+            options = [s for s in options if s != k]   # exclude identity
+            if options:
+                self.synonyms[k] = options
+
         # Sentence structure variations
         self.structure_patterns = [
             'passive_to_active',
             'active_to_passive',
             'reorder_clauses'
         ]
-        
-        logger.info("HighLevelPerturbation initialized")
+
+        logger.info(
+            f"HighLevelPerturbation initialized — "
+            f"{len(self.synonyms)} synonym entries loaded"
+        )
     
     def perturb(self, text: str, intensity: Optional[float] = None) -> str:
         """

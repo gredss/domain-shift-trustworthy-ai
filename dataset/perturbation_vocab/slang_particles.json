@@ -1,0 +1,26 @@
+{
+  "_comment": "Indonesian discourse particles and filler words appended to words during medium-level perturbation. These are extremely common in informal written Indonesian (WhatsApp, Twitter, comment sections). They do not change meaning but shift register from formal to colloquial.",
+
+  "particles": [
+    "sih",
+    "nih",
+    "dong",
+    "deh",
+    "lah",
+    "kok",
+    "kan",
+    "tuh",
+    "woy",
+    "nah",
+    "yah",
+    "kah",
+    "pun",
+    "aja",
+    "juga sih",
+    "gitu lho",
+    "gitu deh",
+    "ya kan",
+    "masa sih",
+    "emang iya"
+  ]
+}
