@@ -17,7 +17,7 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from transformers import (
     AutoModel,
-    AutoTokenizer,BertTokenizer,
+    AutoTokenizer,
     get_linear_schedule_with_warmup
 )
 from torch.optim import AdamW
@@ -265,7 +265,7 @@ class ModelTrainer:
         self._set_seed(random_seed)
         
         # Initialize components
-        self.tokenizer = BertTokenizer.from_pretrained(model_name)
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.model = None
         self.optimizer = None
         self.scheduler = None

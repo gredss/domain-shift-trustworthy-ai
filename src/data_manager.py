@@ -10,7 +10,7 @@ import pandas as pd
 import numpy as np
 from typing import Dict, List, Tuple, Optional
 from sklearn.model_selection import train_test_split
-from transformers import AutoTokenizer, BertTokenizer
+from transformers import AutoTokenizer
 import logging
 
 from debug_logger import (
@@ -340,8 +340,7 @@ class DataManager:
     def initialize_tokenizer(self) -> None:
         """Initialize the tokenizer for text preprocessing."""
         logger.info(f"Initializing tokenizer: {self.tokenizer_name}")
-        self.tokenizer = BertTokenizer.from_pretrained(self.tokenizer_name)
-        print(f"token: {type(self.tokenizer)}")
+        self.tokenizer = AutoTokenizer.from_pretrained(self.tokenizer_name)
         logger.info("Tokenizer initialized successfully")
     
     def preprocess_texts(
