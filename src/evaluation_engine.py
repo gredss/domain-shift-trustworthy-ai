@@ -484,6 +484,22 @@ class PerturbationEvaluator:
     ) -> Dict[str, Any]:
         """
         Evaluate model on perturbed test data.
+
+        In addition to classification metrics, this method records two
+        perturbation-intensity diagnostics that are essential for
+        demonstrating systematic degradation:
+
+        * ``word_change_ratio``  — mean fraction of word-set tokens that
+          differ between original and perturbed texts (symmetric difference
+          divided by original word count).  Increases monotonically across
+          Low → Medium → High by design, providing the quantitative evidence
+          that each level genuinely perturbs more of the text.
+
+        * ``confidence_mean``    — mean max-probability across all test
+          predictions.  A well-calibrated model should show decreasing
+          confidence as perturbation intensity increases, even when the
+          predicted label does not change.  This captures subtle model
+          vulnerability that accuracy / F1 alone may miss.
         
         Args:
             test_df: Test DataFrame
@@ -491,7 +507,8 @@ class PerturbationEvaluator:
             domain: Domain name (for logging)
             
         Returns:
-            Dictionary with evaluation results
+            Dictionary with evaluation results including word_change_ratio
+            and confidence_mean alongside all classification metrics.
         """
         domain_str = f" ({domain})" if domain else ""
         logger.info(
@@ -514,27 +531,44 @@ class PerturbationEvaluator:
             originals=original_texts,
             perturbed=perturbed_texts,
         )
-        # ── debug: perturbation character/word change stats ────────────────
-        import numpy as _np
-        char_changes = [
-            sum(1 for a, b in zip(o, p) if a != b) / max(len(o), 1)
-            for o, p in zip(original_texts, perturbed_texts)
-        ]
+
+        # ── compute word-change ratio (used as perturbation intensity proof) ──
+        #    Symmetric difference of word sets divided by original word count.
+        #    This gives the fraction of *unique* word tokens that changed,
+        #    regardless of text length differences caused by insertions.
         word_changes = [
             len(set(o.split()).symmetric_difference(set(p.split()))) / max(len(o.split()), 1)
+            for o, p in zip(original_texts, perturbed_texts)
+        ]
+        word_change_ratio = float(np.mean(word_changes)) if word_changes else 0.0
+
+        # ── debug: perturbation character/word change stats ────────────────
+        char_changes = [
+            sum(1 for a, b in zip(o, p) if a != b) / max(len(o), 1)
             for o, p in zip(original_texts, perturbed_texts)
         ]
         dbg_perturbation_stats(
             level=perturbation_level,
             domain=domain or "?",
             n_texts=len(perturbed_df),
-            char_change_mean=float(_np.mean(char_changes)) if char_changes else 0.0,
-            word_change_mean=float(_np.mean(word_changes)) if word_changes else 0.0,
+            char_change_mean=float(np.mean(char_changes)) if char_changes else 0.0,
+            word_change_mean=word_change_ratio,
         )
         
         # Get predictions
         y_true = perturbed_df['label'].values
         y_pred, y_proba = self.model_trainer.predict(perturbed_df['text'].tolist())
+
+        # ── compute confidence_mean (mean max-probability across predictions) ──
+        #    Uses the predicted class probability, not always class-1.
+        #    Captures subtle model uncertainty increases under perturbation
+        #    even when the discrete label prediction does not change.
+        proba_array = np.array(y_proba)
+        if proba_array.ndim == 2:
+            confidence_mean = float(np.mean(np.max(proba_array, axis=1)))
+        else:
+            # If 1-D (single probability for class 1), derive both sides
+            confidence_mean = float(np.mean(np.maximum(proba_array, 1 - proba_array)))
         
         # Calculate metrics
         metrics = self.metrics_calculator.calculate_metrics(y_true, y_pred, y_proba)
@@ -551,6 +585,8 @@ class PerturbationEvaluator:
             'perturbation_level': perturbation_level,
             'num_samples': len(perturbed_df),
             'metrics': metrics,
+            'word_change_ratio': word_change_ratio,
+            'confidence_mean': confidence_mean,
             'predictions': y_pred.tolist(),
             'probabilities': y_proba.tolist(),
             'true_labels': y_true.tolist()
@@ -558,7 +594,9 @@ class PerturbationEvaluator:
         
         logger.info(
             f"{perturbation_level.capitalize()}-level perturbation{domain_str} "
-            f"Macro-F1: {metrics['macro_f1']:.4f}"
+            f"Macro-F1: {metrics['macro_f1']:.4f}  "
+            f"word_change: {word_change_ratio:.3f}  "
+            f"confidence: {confidence_mean:.4f}"
         )
         
         return results
@@ -571,25 +609,55 @@ class PerturbationEvaluator:
     ) -> Dict[str, Dict[str, Any]]:
         """
         Evaluate model across all perturbation levels.
-        
+
+        Backfills ``word_change_ratio=0.0`` and ``confidence_mean`` on the
+        clean baseline entry so that the summary printer and downstream
+        consumers always find these keys at every level, including 'clean'.
+
         Args:
             test_df: Test DataFrame
             clean_results: Results on clean (unperturbed) data
             domain: Domain name
             
         Returns:
-            Dictionary mapping perturbation levels to results
+            Dictionary mapping perturbation levels to results.
+            Every entry (including 'clean') contains:
+              - metrics            : full classification metric dict
+              - word_change_ratio  : mean fraction of word tokens changed
+              - confidence_mean    : mean max-prediction probability
+              - robustness_metrics : drop / drop_pct vs clean (absent on 'clean')
         """
         levels = ['low', 'medium', 'high']
+
+        # ── backfill clean baseline diagnostics ───────────────────────────
+        # word_change_ratio is 0 by definition on clean text.
+        # confidence_mean on clean gives the upper-bound reference point.
+        if 'word_change_ratio' not in clean_results:
+            clean_results['word_change_ratio'] = 0.0
+        if 'confidence_mean' not in clean_results:
+            y_proba_clean = np.array(clean_results.get('probabilities', []))
+            if y_proba_clean.size > 0:
+                if y_proba_clean.ndim == 2:
+                    clean_conf = float(np.mean(np.max(y_proba_clean, axis=1)))
+                else:
+                    clean_conf = float(np.mean(np.maximum(y_proba_clean, 1 - y_proba_clean)))
+            else:
+                clean_conf = 0.0
+            clean_results['confidence_mean'] = clean_conf
+
         results = {'clean': clean_results}
         
         for level in levels:
             results[level] = self.evaluate_with_perturbation(test_df, level, domain)
             
-            # Calculate robustness metrics
+            # Calculate robustness metrics (F1, accuracy, precision, recall drops)
             robustness = self.metrics_calculator.calculate_robustness_metrics(
                 clean_results['metrics'],
                 results[level]['metrics']
+            )
+            # Extend robustness with confidence drop for thesis evidence
+            robustness['confidence_drop'] = (
+                clean_results['confidence_mean'] - results[level]['confidence_mean']
             )
             results[level]['robustness_metrics'] = robustness
 

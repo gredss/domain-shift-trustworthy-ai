@@ -319,19 +319,33 @@ def _print_cross_domain_full(cross_domain: dict) -> None:
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _print_perturbation(perturbation: dict, in_domain: dict) -> None:
+    """
+    Section 5 — Perturbation Robustness.
+
+    Prints three sub-tables:
+
+    5a. Summary: Macro-F1 across Clean / Low / Medium / High + worst-level drop
+    5b. Systematic degradation evidence per domain:
+        Columns: Level | WordChange% | Confidence | Accuracy | MacroF1 | F1-0 | F1-1 | Drop | Drop%
+        This is the table your partner asked for — it shows monotonic intensity
+        increase (WordChange) alongside the corresponding performance change,
+        with per-class F1 and confidence as additional evidence.
+    5c. Aggregate robustness drop table across all metrics.
+    """
     _section(5, "PERTURBATION ROBUSTNESS  (F1-Score across noise levels)")
 
     col_w = 10
+
+    # ── 5a. Summary macro-F1 row ──────────────────────────────────────────
     print(f"  {'Domain':<14}", end="")
     for lvl in PERTURB_LEVELS:
         print(f"  {lvl.capitalize():>{col_w}}", end="")
-    print(f"  {'Drop(hi-cl)':>{col_w}}  {'Δ%':>7}")
+    print(f"  {'WorstDrop':>{col_w}}  {'Δ%':>7}")
     print("  " + SEP_THIN)
 
     all_drops = []
     for dom in DOMAINS:
         pdom = perturbation.get(dom, {})
-        # 'clean' comes from in_domain if not directly in perturbation
         clean_f1 = _v(
             pdom.get("clean", {}).get("metrics", {}).get("macro_f1")
             or in_domain.get(dom, {}).get("metrics", {}).get("macro_f1", 0)
@@ -340,19 +354,18 @@ def _print_perturbation(perturbation: dict, in_domain: dict) -> None:
         for lvl in ["low", "medium", "high"]:
             row_vals[lvl] = _v(pdom.get(lvl, {}).get("metrics", {}).get("macro_f1", 0))
 
-        high_f1 = row_vals["high"]
-        drop = clean_f1 - high_f1
-        drop_pct = (drop / clean_f1 * 100) if clean_f1 > 0 else 0.0
-        all_drops.append(drop)
+        # Worst drop = max degradation across all perturbed levels
+        worst_drop = max(clean_f1 - row_vals[l] for l in ["low", "medium", "high"])
+        drop_pct   = (worst_drop / clean_f1 * 100) if clean_f1 > 0 else 0.0
+        all_drops.append(worst_drop)
 
         print(f"  {dom:<14}", end="")
         for lvl in PERTURB_LEVELS:
             print(f"  {row_vals[lvl]:>{col_w}.4f}", end="")
-        drop_marker = "▼" if drop > 0.05 else ("▲" if drop < -0.01 else "≈")
-        print(f"  {drop:>+{col_w}.4f}  {drop_pct:>+6.1f}% {drop_marker}")
+        drop_marker = "▼" if worst_drop > 0.05 else ("▲" if worst_drop < -0.01 else "≈")
+        print(f"  {worst_drop:>+{col_w}.4f}  {drop_pct:>+6.1f}% {drop_marker}")
 
     print("  " + SEP_THIN)
-    # mean row
     print(f"  {'  MEAN':<14}", end="")
     for lvl in PERTURB_LEVELS:
         if lvl == "clean":
@@ -371,26 +384,141 @@ def _print_perturbation(perturbation: dict, in_domain: dict) -> None:
         print(f"  {np.mean(vals):>{col_w}.4f}", end="")
     print(f"  {np.mean(all_drops):>+{col_w}.4f}")
 
-    # Perturbation full metrics per domain
-    print(f"\n  Perturbation — All Metrics per Domain:\n")
+    # ── 5b. Systematic degradation evidence — the key table ──────────────
+    # Shows WordChange% and Confidence alongside per-class F1 and drop.
+    # This directly satisfies: "ada systematic degradation" evidence.
+    print(f"\n  {'─'*80}")
+    print(f"  Systematic Degradation Evidence — per Domain\n")
+    print(f"  (WordChange = mean fraction of unique word tokens changed per text)")
+    print(f"  (Confidence = mean max-class prediction probability)\n")
+
+    hdr_cols = [
+        ("Level",      8),
+        ("WordChg%",   9),
+        ("Confidence", 11),
+        ("Accuracy",   10),
+        ("Macro-F1",   10),
+        ("F1-cl0",      8),
+        ("F1-cl1",      8),
+        ("F1-Drop",     9),
+        ("Drop%",       7),
+    ]
+
     for dom in DOMAINS:
-        pdom = perturbation.get(dom, {})
-        clean_mets = in_domain.get(dom, {}).get("metrics", {})
+        pdom      = perturbation.get(dom, {})
+        id_mets   = in_domain.get(dom, {}).get("metrics", {})
+
+        # Clean baseline values
+        clean_f1   = _v(id_mets.get("macro_f1", 0))
+        clean_acc  = _v(id_mets.get("accuracy", 0))
+        clean_f1_0 = _v(id_mets.get("f1_0", 0))
+        clean_f1_1 = _v(id_mets.get("f1_1", 0))
+        clean_wcr  = _v(pdom.get("clean", {}).get("word_change_ratio", 0))
+        clean_conf = _v(pdom.get("clean", {}).get("confidence_mean", 0))
+
         print(f"  [{dom}]")
-        print(f"  {'Level':<10}", end="")
-        for m in ["accuracy","macro_f1","macro_precision","macro_recall"]:
-            print(f"  {METRIC_LABELS[m]:>{col_w}}", end="")
+        # header
+        print("  ", end="")
+        for label, width in hdr_cols:
+            print(f"  {label:>{width}}", end="")
         print()
-        for lvl in PERTURB_LEVELS:
+        print("  " + "─" * 78)
+
+        # Clean row
+        print(f"  ", end="")
+        print(f"  {'Clean':>8}", end="")
+        print(f"  {clean_wcr*100:>8.1f}%", end="")
+        print(f"  {clean_conf:>11.4f}", end="")
+        print(f"  {clean_acc:>10.4f}", end="")
+        print(f"  {clean_f1:>10.4f}", end="")
+        print(f"  {clean_f1_0:>8.4f}", end="")
+        print(f"  {clean_f1_1:>8.4f}", end="")
+        print(f"  {'—':>9}", end="")
+        print(f"  {'—':>7}")
+
+        # Perturbed rows
+        for lvl in ["low", "medium", "high"]:
+            ldata  = pdom.get(lvl, {})
+            lmets  = ldata.get("metrics", {})
+            l_f1   = _v(lmets.get("macro_f1",  0))
+            l_acc  = _v(lmets.get("accuracy",  0))
+            l_f1_0 = _v(lmets.get("f1_0",      0))
+            l_f1_1 = _v(lmets.get("f1_1",      0))
+            l_wcr  = _v(ldata.get("word_change_ratio", 0))
+            l_conf = _v(ldata.get("confidence_mean",   0))
+            f1_drop     = clean_f1 - l_f1
+            f1_drop_pct = (f1_drop / clean_f1 * 100) if clean_f1 > 0 else 0.0
+            drop_sign   = "▼" if f1_drop > 0.02 else ("▲" if f1_drop < -0.005 else "≈")
+
+            print(f"  ", end="")
+            print(f"  {lvl.capitalize():>8}", end="")
+            print(f"  {l_wcr*100:>8.1f}%", end="")
+            print(f"  {l_conf:>11.4f}", end="")
+            print(f"  {l_acc:>10.4f}", end="")
+            print(f"  {l_f1:>10.4f}", end="")
+            print(f"  {l_f1_0:>8.4f}", end="")
+            print(f"  {l_f1_1:>8.4f}", end="")
+            print(f"  {f1_drop:>+9.4f}", end="")
+            print(f"  {f1_drop_pct:>+6.1f}% {drop_sign}")
+        print()
+
+    # ── 5c. Aggregate robustness drop across all metrics ──────────────────
+    print(f"  {'─'*80}")
+    print(f"  Aggregate Robustness Drop  (mean across domains, Clean → level)\n")
+    agg_hdr = [("Metric", 18), ("Clean", 8), ("Low", 8),
+               ("Medium", 8), ("High", 8), ("Low-Drop", 10),
+               ("Med-Drop", 10), ("Hi-Drop", 10)]
+    print("  ", end="")
+    for label, width in agg_hdr:
+        print(f"  {label:>{width}}", end="")
+    print()
+    print("  " + "─" * 78)
+
+    agg_metrics = [
+        ("Macro-F1",    "macro_f1"),
+        ("F1 class-0",  "f1_0"),
+        ("F1 class-1",  "f1_1"),
+        ("Accuracy",    "accuracy"),
+        ("Confidence",  None),          # pulled from top-level, not metrics dict
+    ]
+
+    for label, key in agg_metrics:
+        def _dom_val(dom, lvl, k):
+            pdom = perturbation.get(dom, {})
+            if k is None:
+                if lvl == "clean":
+                    return _v(pdom.get("clean", {}).get("confidence_mean", 0))
+                return _v(pdom.get(lvl, {}).get("confidence_mean", 0))
             if lvl == "clean":
-                mets = clean_mets
-            else:
-                mets = pdom.get(lvl, {}).get("metrics", {})
-            print(f"  {lvl.capitalize():<10}", end="")
-            for m in ["accuracy","macro_f1","macro_precision","macro_recall"]:
-                print(f"  {_v(mets.get(m, 0)):>{col_w}.4f}", end="")
-            print()
-        print()
+                v = (pdom.get("clean", {}).get("metrics", {}).get(k)
+                     or in_domain.get(dom, {}).get("metrics", {}).get(k, 0))
+                return _v(v)
+            return _v(pdom.get(lvl, {}).get("metrics", {}).get(k, 0))
+
+        c_vals  = [_dom_val(d, "clean",  key) for d in DOMAINS]
+        lo_vals = [_dom_val(d, "low",    key) for d in DOMAINS]
+        me_vals = [_dom_val(d, "medium", key) for d in DOMAINS]
+        hi_vals = [_dom_val(d, "high",   key) for d in DOMAINS]
+
+        c_mean  = np.mean(c_vals)
+        lo_mean = np.mean(lo_vals)
+        me_mean = np.mean(me_vals)
+        hi_mean = np.mean(hi_vals)
+
+        lo_drop = c_mean - lo_mean
+        me_drop = c_mean - me_mean
+        hi_drop = c_mean - hi_mean
+
+        print(f"  ", end="")
+        print(f"  {label:>18}", end="")
+        print(f"  {c_mean:>8.4f}", end="")
+        print(f"  {lo_mean:>8.4f}", end="")
+        print(f"  {me_mean:>8.4f}", end="")
+        print(f"  {hi_mean:>8.4f}", end="")
+        print(f"  {lo_drop:>+10.4f}", end="")
+        print(f"  {me_drop:>+10.4f}", end="")
+        print(f"  {hi_drop:>+10.4f}")
+    print()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
