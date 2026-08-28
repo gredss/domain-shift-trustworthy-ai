@@ -30,7 +30,7 @@ import argparse
 import logging
 import traceback
 from datetime import datetime
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 import pandas as pd
 import numpy as np
 
@@ -61,7 +61,8 @@ class EvaluationPipeline:
         output_dir: str = "evaluation_results",
         train_output_dir: str = "output",
         device: str = "auto",
-        random_seed: int = 42
+        random_seed: int = 42,
+        thesaurus_path: Optional[str] = None,
     ):
         """
         Initialize evaluation pipeline.
@@ -73,6 +74,8 @@ class EvaluationPipeline:
             train_output_dir: Directory used by train_pipeline.py (where data_splits/ were saved)
             device: Device to use ('cuda', 'cpu', or 'auto')
             random_seed: Random seed for reproducibility
+            thesaurus_path: Path to the Indonesian thesaurus dict.json.
+                Defaults to <dataset_dir>/data/dict.json (the copy committed in the repo).
         """
         self.checkpoint_dir = checkpoint_dir
         self.dataset_dir = dataset_dir
@@ -80,6 +83,11 @@ class EvaluationPipeline:
         self.train_output_dir = train_output_dir
         self.device = device
         self.random_seed = random_seed
+        # Resolve thesaurus path: prefer explicit arg, then derive from dataset_dir
+        if thesaurus_path is not None:
+            self.thesaurus_path = thesaurus_path
+        else:
+            self.thesaurus_path = os.path.join(dataset_dir, "data", "dict.json")
         
         reproducibility.set_seed(random_seed)
         file_manager.ensure_directory(output_dir)
@@ -235,13 +243,22 @@ class EvaluationPipeline:
         total_timer = Timer()
         total_timer.start()
         
-        perturbation_engine = PerturbationEngine(random_seed=self.random_seed)
+        perturbation_engine = PerturbationEngine(
+            thesaurus_path=self.thesaurus_path,
+            random_seed=self.random_seed,
+        )
         
         model_output_dir = os.path.join(self.output_dir, model_name)
+        perturbation_output_dir = os.path.join(
+            "/content/drive/MyDrive/thesis/results/perturb_data",
+            model_name
+        )
+
         eval_engine = EvaluationEngine(
             model_trainers=domain_trainers,
             perturbation_engine=perturbation_engine,
-            output_dir=model_output_dir
+            output_dir=model_output_dir,
+            perturbation_output_dir=perturbation_output_dir
         )
         
         results = eval_engine.run_complete_evaluation(
@@ -533,6 +550,12 @@ def parse_arguments():
         help='Random seed for reproducibility (default: 42)'
     )
     parser.add_argument(
+        '--thesaurus-path', type=str, default=None,
+        help='Path to dict.json thesaurus file. '
+             'Defaults to <dataset-dir>/data/dict.json (committed in the repo). '
+             'Override with e.g. /content/dict.json on Colab if using a Drive copy.'
+    )
+    parser.add_argument(
         '--debug', action='store_true',
         help='Enable comprehensive debug logging for all pipeline stages '
              '(also enabled via DEBUG_PIPELINE=1 env var)'
@@ -557,7 +580,8 @@ def main():
             output_dir=args.output_dir,
             train_output_dir=args.train_output_dir,
             device=args.device,
-            random_seed=args.seed
+            random_seed=args.seed,
+            thesaurus_path=args.thesaurus_path,
         )
         
         models = [args.model] if args.model != 'all' else ['base', 'large', 'lite']

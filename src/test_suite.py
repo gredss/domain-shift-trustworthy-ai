@@ -90,6 +90,9 @@ def _make_transformers_mock():
     tr.AutoTokenizer = types.SimpleNamespace(
         from_pretrained=MagicMock(return_value=dummy_tokenizer)
     )
+    tr.BertTokenizer = types.SimpleNamespace(
+        from_pretrained=MagicMock(return_value=dummy_tokenizer)
+    )
     dummy_model = MagicMock()
     dummy_model.config = types.SimpleNamespace(hidden_size=768)
     tr.AutoModel = types.SimpleNamespace(
@@ -113,6 +116,31 @@ def _make_streamlit_mock():
         setattr(st, attr, MagicMock())
     return st
 
+def _make_sastrawi_mock():
+    """Minimal stub so perturbation_engine.py can be imported without PySastrawi installed."""
+    sastrawi_root     = types.ModuleType("Sastrawi")
+    sastrawi_stemmer  = types.ModuleType("Sastrawi.Stemmer")
+    sastrawi_factory  = types.ModuleType("Sastrawi.Stemmer.StemmerFactory")
+
+    class _FakeStemmer:
+        def stem(self, word: str) -> str:
+            # Naive fallback: strip common Indonesian suffixes so the stub
+            # behaves deterministically without the real stemmer.
+            for suffix in ("kan", "an", "i", "nya", "ku", "mu"):
+                if word.endswith(suffix) and len(word) > len(suffix) + 2:
+                    return word[: -len(suffix)]
+            return word
+
+    class _FakeStemmerFactory:
+        def create_stemmer(self):
+            return _FakeStemmer()
+
+    sastrawi_factory.StemmerFactory = _FakeStemmerFactory
+    sastrawi_root.Stemmer = sastrawi_stemmer
+    sastrawi_stemmer.StemmerFactory = sastrawi_factory
+    return sastrawi_root, sastrawi_stemmer, sastrawi_factory
+
+
 for _name, _factory in [
     ("torch", _make_torch_mock),
     ("torch.nn", lambda: _make_torch_mock().nn),
@@ -131,6 +159,13 @@ for _name, _factory in [
     if _name not in sys.modules:
         sys.modules[_name] = _factory() if callable(_factory) else _factory
 
+# Sastrawi must be mocked before perturbation_engine is imported
+if "Sastrawi" not in sys.modules:
+    _s_root, _s_stemmer, _s_factory = _make_sastrawi_mock()
+    sys.modules["Sastrawi"]                        = _s_root
+    sys.modules["Sastrawi.Stemmer"]                = _s_stemmer
+    sys.modules["Sastrawi.Stemmer.StemmerFactory"] = _s_factory
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Now safe to import project modules
 # ──────────────────────────────────────────────────────────────────────────────
@@ -148,9 +183,12 @@ from utils import (
 from data_manager import DataManager, DatasetValidator
 from perturbation_engine import (
     PerturbationEngine,
-    LowLevelPerturbation,
-    MediumLevelPerturbation,
-    HighLevelPerturbation,
+    SemanticWordSubstitution,
+    IndonesianThesaurus,
+    PERTURBATION_INTENSITIES,
+    SIM_MIN,
+    SIM_MAX,
+    tokenize_words,
 )
 from evaluation_engine import (
     MetricsCalculator,
@@ -228,8 +266,8 @@ def _make_fake_results(domains=None, include_perturbation=True) -> dict:
             "domain": domain,
             "num_samples": n,
             "metrics": {
-                "accuracy": 0.75, "precision": 0.74,
-                "recall": 0.76,  "f1": 0.75,
+                "accuracy": 0.75,
+                "macro_precision": 0.74, "macro_recall": 0.76, "macro_f1": 0.75,
                 "mcc": 0.50, "roc_auc": 0.80,
                 "confusion_matrix": [[10, 5], [3, 12]],
             },
@@ -261,9 +299,11 @@ def _make_fake_results(domains=None, include_perturbation=True) -> dict:
             perturbation[d] = {}
             for lvl in ["clean", "low", "medium", "high"]:
                 perturbation[d][lvl] = {
-                    "metrics": {"accuracy": 0.75 - 0.03 * ["clean","low","medium","high"].index(lvl),
-                                "f1": 0.75 - 0.05 * ["clean","low","medium","high"].index(lvl),
-                                "precision": 0.74, "recall": 0.76},
+                    "metrics": {
+                        "accuracy": 0.75 - 0.03 * ["clean","low","medium","high"].index(lvl),
+                        "macro_f1": 0.75 - 0.05 * ["clean","low","medium","high"].index(lvl),
+                        "macro_precision": 0.74, "macro_recall": 0.76,
+                    },
                     "predictions": preds,
                     "probabilities": proba,
                     "true_labels": labels,
@@ -536,16 +576,128 @@ SAMPLE_HEADLINES = [
     "Beasiswa S2 Luar Negeri Gratis Dibuka, Ini Syaratnya!",
 ]
 
+# ── Shared thesaurus path for perturbation tests (file lives in the repo) ────
+_THESAURUS_PATH = os.path.join(
+    os.path.dirname(__file__), "..", "dataset", "data", "dict.json"
+)
+_THESAURUS_PATH = os.path.normpath(_THESAURUS_PATH)
+
+
+class TestPerturbationConstants(unittest.TestCase):
+    """The engine-level constants must match the experiment design."""
+
+    def test_intensities_keys(self):
+        self.assertEqual(set(PERTURBATION_INTENSITIES.keys()), {"low", "medium", "high"})
+
+    def test_intensities_ordered(self):
+        """Low < Medium < High."""
+        self.assertLess(PERTURBATION_INTENSITIES["low"], PERTURBATION_INTENSITIES["medium"])
+        self.assertLess(PERTURBATION_INTENSITIES["medium"], PERTURBATION_INTENSITIES["high"])
+
+    def test_intensities_values(self):
+        self.assertAlmostEqual(PERTURBATION_INTENSITIES["low"],    0.10)
+        self.assertAlmostEqual(PERTURBATION_INTENSITIES["medium"], 0.20)
+        self.assertAlmostEqual(PERTURBATION_INTENSITIES["high"],   0.30)
+
+    def test_sim_bounds(self):
+        self.assertGreater(SIM_MIN, 0.0)
+        self.assertLess(SIM_MAX, 1.0)
+        self.assertLess(SIM_MIN, SIM_MAX)
+
+    def test_tokenize_words_returns_list(self):
+        tokens = tokenize_words("IndoBERT mengubah dunia NLP")
+        self.assertIsInstance(tokens, list)
+        self.assertGreater(len(tokens), 0)
+        for tok in tokens:
+            self.assertIsInstance(tok, str)
+
+    def test_tokenize_words_strips_punctuation(self):
+        tokens = tokenize_words("Halo, dunia! Ini tes.")
+        for tok in tokens:
+            self.assertNotIn(",", tok)
+            self.assertNotIn("!", tok)
+            self.assertNotIn(".", tok)
+
+
 class TestPerturbationEngine(unittest.TestCase):
+    """Tests for PerturbationEngine using a mocked SemanticWordSubstitution
+    so no live IndoBERT model or thesaurus file is needed."""
+
+    def _make_engine(self):
+        """Return a PerturbationEngine whose inner SemanticWordSubstitution is
+        replaced by a deterministic stub that substitutes every word with its
+        reverse (preserving word count and token positions)."""
+        engine = PerturbationEngine.__new__(PerturbationEngine)
+        engine.random_seed = 42
+        engine.sim_min = SIM_MIN
+        engine.sim_max = SIM_MAX
+
+        stub = MagicMock()
+
+        def _stub_perturb_with_metadata(text, intensity):
+            words = tokenize_words(text)
+            n = len(words)
+            n_change = max(1, int(n * intensity)) if n else 0
+            result_text = text
+            replacements = []
+            for i, w in enumerate(words[:n_change]):
+                replacement = w[::-1] if w[::-1] != w else w + "x"
+                result_text = result_text.replace(w, replacement, 1)
+                replacements.append({
+                    "position": i, "original": w, "replacement": replacement,
+                    "word_cosine_similarity": 0.88,
+                    "lookup_source": "direct", "parent_word": None,
+                    "original_lookup_source": "direct", "original_parent_word": None,
+                    "candidate_pos": "NN", "pos_verified": True, "pos_source": "stub",
+                })
+            words_changed = len(replacements)
+            return {
+                "original_text": text,
+                "perturbed_text": result_text,
+                "perturbation_level": None,
+                "perturbation_rule": "stub",
+                "target_intensity": intensity,
+                "total_words": n,
+                "direct_lookup_words": words_changed,
+                "reverse_parent_lookup_words": 0,
+                "stemmed_lookup_words": 0,
+                "failed_lookup_words": max(0, n - words_changed),
+                "eligible_words": n,
+                "target_words": n_change,
+                "words_changed": words_changed,
+                "actual_ratio_all_words": words_changed / n if n else 0.0,
+                "actual_ratio_eligible_words": words_changed / n if n else 0.0,
+                "is_same_as_original": result_text == text,
+                "similarity_in_range": True,
+                "perturbation_in_range": words_changed == n_change,
+                "word_cosine_similarity_mean": 0.88,
+                "word_cosine_similarity_min": 0.88,
+                "word_cosine_similarity_max": 0.88,
+                "replacements": replacements,
+            }
+
+        stub.perturb_with_metadata.side_effect = _stub_perturb_with_metadata
+        engine.perturbation = stub
+        return engine
 
     def setUp(self):
-        self.engine = PerturbationEngine(random_seed=42)
+        self.engine = self._make_engine()
 
-    # ── Low-level ─────────────────────────────────────────────────────────────
+    # ── apply_perturbation returns string ─────────────────────────────────────
 
     def test_low_level_returns_string(self):
         for text in SAMPLE_HEADLINES:
             result = self.engine.apply_perturbation(text, "low")
+            self.assertIsInstance(result, str)
+
+    def test_medium_level_returns_string(self):
+        for text in SAMPLE_HEADLINES:
+            result = self.engine.apply_perturbation(text, "medium")
+            self.assertIsInstance(result, str)
+
+    def test_high_level_returns_string(self):
+        for text in SAMPLE_HEADLINES:
+            result = self.engine.apply_perturbation(text, "high")
             self.assertIsInstance(result, str)
 
     def test_low_level_nonempty(self):
@@ -553,62 +705,52 @@ class TestPerturbationEngine(unittest.TestCase):
             result = self.engine.apply_perturbation(text, "low")
             self.assertGreater(len(result), 0)
 
-    def test_low_level_changes_text(self):
-        """At least some inputs must be changed by low perturbation."""
-        changed = sum(
-            1 for t in SAMPLE_HEADLINES
-            if self.engine.apply_perturbation(t, "low") != t
+    # ── Same underlying method, different intensities ─────────────────────────
+
+    def test_all_levels_use_same_method(self):
+        """All three levels must delegate to the same perturbation object."""
+        for level in ("low", "medium", "high"):
+            self.engine.apply_perturbation(SAMPLE_HEADLINES[0], level)
+        # stub.perturb_with_metadata was called exactly once per level call
+        self.assertEqual(
+            self.engine.perturbation.perturb_with_metadata.call_count,
+            3,
         )
-        self.assertGreater(changed, 0)
 
-    def test_swap_implemented(self):
-        """Verify swap is not a no-op: the code path runs and produces changes."""
-        low = LowLevelPerturbation(random_seed=0)
-        # Simply verify that high-intensity perturbation changes strings across
-        # many trials — swap + other ops ensure this.
-        changed = sum(
-            1 for _ in range(50)
-            if low.perturb("abcdefghij", intensity=0.5) != "abcdefghij"
-        )
-        self.assertGreater(changed, 0)
+    def test_intensity_increases_with_level(self):
+        """Higher levels must request higher intensity from the underlying method."""
+        calls = {}
+        for level in ("low", "medium", "high"):
+            self.engine.perturbation.perturb_with_metadata.reset_mock()
+            self.engine.apply_perturbation(SAMPLE_HEADLINES[0], level)
+            _, kwargs = self.engine.perturbation.perturb_with_metadata.call_args
+            calls[level] = kwargs.get("intensity") or self.engine.perturbation.perturb_with_metadata.call_args[0][1]
+        self.assertLess(calls["low"], calls["medium"])
+        self.assertLess(calls["medium"], calls["high"])
 
-    # ── Medium-level ──────────────────────────────────────────────────────────
-
-    def test_medium_level_returns_string(self):
-        for text in SAMPLE_HEADLINES:
-            result = self.engine.apply_perturbation(text, "medium")
-            self.assertIsInstance(result, str)
-
-    def test_medium_level_uses_informal_vocab(self):
-        """Medium perturbation should eventually replace 'tidak' with slang."""
-        med = MediumLevelPerturbation(random_seed=1)
-        results = [med.perturb("tidak bisa tidak") for _ in range(30)]
-        any_informal = any(
-            any(w in r for w in ["gak", "nggak", "ga", "bs"]) for r in results
-        )
-        self.assertTrue(any_informal, "Medium perturbation never produced informal words")
-
-    # ── High-level ────────────────────────────────────────────────────────────
-
-    def test_high_level_returns_string(self):
-        for text in SAMPLE_HEADLINES:
-            result = self.engine.apply_perturbation(text, "high")
-            self.assertIsInstance(result, str)
-
-    def test_high_level_synonym_replacement(self):
-        """High perturbation should replace known synonyms."""
-        hi = HighLevelPerturbation(random_seed=0)
-        results = [hi.perturb("masalah besar ini sangat penting") for _ in range(30)]
-        any_synonym = any(
-            any(w in r for w in ["raksasa", "krusial", "vital", "esensial"]) for r in results
-        )
-        self.assertTrue(any_synonym, "High perturbation never produced synonyms")
-
-    # ── Invalid level ─────────────────────────────────────────────────────────
+    # ── Invalid level raises ──────────────────────────────────────────────────
 
     def test_invalid_level_raises(self):
         with self.assertRaises(ValueError):
             self.engine.apply_perturbation("text", "extreme")
+
+    # ── apply_perturbation_with_metadata ─────────────────────────────────────
+
+    def test_metadata_has_required_keys(self):
+        result = self.engine.apply_perturbation_with_metadata(
+            SAMPLE_HEADLINES[0], "low"
+        )
+        for key in ("original_text", "perturbed_text", "replacements",
+                    "words_changed", "perturbation_level", "target_intensity",
+                    "perturbation_in_range"):
+            self.assertIn(key, result)
+
+    def test_metadata_level_field_matches_requested(self):
+        for level in ("low", "medium", "high"):
+            result = self.engine.apply_perturbation_with_metadata(
+                SAMPLE_HEADLINES[0], level
+            )
+            self.assertEqual(result["perturbation_level"], level)
 
     # ── DataFrame API ─────────────────────────────────────────────────────────
 
@@ -618,50 +760,27 @@ class TestPerturbationEngine(unittest.TestCase):
         self.assertEqual(len(result), len(df))
         self.assertIn("text", result.columns)
 
-    # ── Reproducibility ───────────────────────────────────────────────────────
+    def test_apply_to_dataframe_invalid_level_raises(self):
+        df = pd.DataFrame({"text": SAMPLE_HEADLINES[:2], "label": [0, 1]})
+        with self.assertRaises(ValueError):
+            self.engine.apply_to_dataframe(df, text_column="text", level="extreme")
 
-    def test_reproducibility_low(self):
-        e1, e2 = PerturbationEngine(42), PerturbationEngine(42)
-        for t in SAMPLE_HEADLINES:
-            self.assertEqual(e1.apply_perturbation(t, "low"),
-                             e2.apply_perturbation(t, "low"))
-
-    def test_reproducibility_medium(self):
-        e1, e2 = PerturbationEngine(42), PerturbationEngine(42)
-        for t in SAMPLE_HEADLINES:
-            self.assertEqual(e1.apply_perturbation(t, "medium"),
-                             e2.apply_perturbation(t, "medium"))
-
-    def test_reproducibility_high(self):
-        e1, e2 = PerturbationEngine(42), PerturbationEngine(42)
-        for t in SAMPLE_HEADLINES:
-            self.assertEqual(e1.apply_perturbation(t, "high"),
-                             e2.apply_perturbation(t, "high"))
-
-    def test_independent_rng_streams(self):
-        """Low, medium, high must use independent streams — running low first
-        must not alter the output of medium."""
-        e = PerturbationEngine(42)
-        # Run low on all texts
-        _ = [e.apply_perturbation(t, "low") for t in SAMPLE_HEADLINES]
-        # Now get medium results
-        med_after_low = [e.apply_perturbation(t, "medium") for t in SAMPLE_HEADLINES]
-
-        # Fresh engine — run medium without running low first
-        e2 = PerturbationEngine(42)
-        med_fresh = [e2.apply_perturbation(t, "medium") for t in SAMPLE_HEADLINES]
-
-        self.assertEqual(med_after_low, med_fresh,
-                         "Medium RNG stream is polluted by running low first")
-
-    # ── Stats helper ──────────────────────────────────────────────────────────
+    # ── get_perturbation_stats ────────────────────────────────────────────────
 
     def test_perturbation_stats_keys(self):
         original  = "Teknologi AI mengubah dunia"
         perturbed = self.engine.apply_perturbation(original, "low")
         stats = self.engine.get_perturbation_stats(original, perturbed)
-        for key in ("char_change_ratio", "word_change_ratio", "original_length"):
+        for key in ("word_change_ratio", "words_changed",
+                    "original_word_count", "perturbed_word_count"):
             self.assertIn(key, stats)
+
+    def test_perturbation_stats_ratio_range(self):
+        original  = "Teknologi AI mengubah dunia dengan cepat"
+        perturbed = self.engine.apply_perturbation(original, "medium")
+        stats = self.engine.get_perturbation_stats(original, perturbed)
+        self.assertGreaterEqual(stats["word_change_ratio"], 0.0)
+        self.assertLessEqual(stats["word_change_ratio"], 1.0)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -681,7 +800,8 @@ class TestMetricsCalculator(unittest.TestCase):
 
     def test_calculate_metrics_keys(self):
         m = self.calc.calculate_metrics(self.y_true, self.y_pred, self.y_proba)
-        for key in ("accuracy", "precision", "recall", "f1", "mcc", "roc_auc", "confusion_matrix"):
+        for key in ("accuracy", "macro_precision", "macro_recall", "macro_f1",
+                    "mcc", "roc_auc", "confusion_matrix"):
             self.assertIn(key, m)
 
     def test_accuracy_range(self):
@@ -691,8 +811,8 @@ class TestMetricsCalculator(unittest.TestCase):
 
     def test_f1_range(self):
         m = self.calc.calculate_metrics(self.y_true, self.y_pred)
-        self.assertGreaterEqual(m["f1"], 0.0)
-        self.assertLessEqual(m["f1"],    1.0)
+        self.assertGreaterEqual(m["macro_f1"], 0.0)
+        self.assertLessEqual(m["macro_f1"],    1.0)
 
     def test_confusion_matrix_shape(self):
         m = self.calc.calculate_metrics(self.y_true, self.y_pred)
@@ -701,30 +821,30 @@ class TestMetricsCalculator(unittest.TestCase):
 
     def test_perfect_prediction(self):
         m = self.calc.calculate_metrics(self.y_true, self.y_true)
-        self.assertAlmostEqual(m["accuracy"], 1.0)
-        self.assertAlmostEqual(m["f1"],       1.0)
+        self.assertAlmostEqual(m["accuracy"],  1.0)
+        self.assertAlmostEqual(m["macro_f1"],  1.0)
 
     def test_robustness_metrics_drop_direction(self):
-        clean     = {"accuracy": 0.90, "precision": 0.88, "recall": 0.91, "f1": 0.89}
-        perturbed = {"accuracy": 0.75, "precision": 0.73, "recall": 0.76, "f1": 0.74}
+        clean     = {"accuracy": 0.90, "macro_precision": 0.88, "macro_recall": 0.91, "macro_f1": 0.89}
+        perturbed = {"accuracy": 0.75, "macro_precision": 0.73, "macro_recall": 0.76, "macro_f1": 0.74}
         rob = self.calc.calculate_robustness_metrics(clean, perturbed)
-        self.assertGreater(rob["f1_drop"],       0)   # f1 degraded
-        self.assertGreater(rob["accuracy_drop"], 0)
+        self.assertGreater(rob["macro_f1_drop"],   0)   # f1 degraded
+        self.assertGreater(rob["accuracy_drop"],   0)
 
     def test_robustness_metrics_no_drop(self):
-        m = {"accuracy": 0.80, "precision": 0.80, "recall": 0.80, "f1": 0.80}
+        m = {"accuracy": 0.80, "macro_precision": 0.80, "macro_recall": 0.80, "macro_f1": 0.80}
         rob = self.calc.calculate_robustness_metrics(m, m)
-        self.assertAlmostEqual(rob["f1_drop"], 0.0)
+        self.assertAlmostEqual(rob["macro_f1_drop"], 0.0)
 
     def test_domain_shift_sd_td(self):
-        src = {"accuracy": 0.88, "f1": 0.87, "precision": 0.86, "recall": 0.88}
-        cross = {"accuracy": 0.70, "f1": 0.69, "precision": 0.68, "recall": 0.70}
-        tgt_in = {"accuracy": 0.85, "f1": 0.84, "precision": 0.83, "recall": 0.85}
+        src   = {"accuracy": 0.88, "macro_f1": 0.87, "macro_precision": 0.86, "macro_recall": 0.88}
+        cross = {"accuracy": 0.70, "macro_f1": 0.69, "macro_precision": 0.68, "macro_recall": 0.70}
+        tgt_in = {"accuracy": 0.85, "macro_f1": 0.84, "macro_precision": 0.83, "macro_recall": 0.85}
         shift = self.calc.calculate_domain_shift_metrics(src, cross, tgt_in)
-        self.assertIn("sd_f1", shift)
-        self.assertIn("td_f1", shift)
-        self.assertGreater(shift["sd_f1"], 0)   # source degraded OOD
-        self.assertGreater(shift["td_f1"], 0)   # target specialist still better
+        self.assertIn("sd_macro_f1", shift)
+        self.assertIn("td_macro_f1", shift)
+        self.assertGreater(shift["sd_macro_f1"], 0)   # source degraded OOD
+        self.assertGreater(shift["td_macro_f1"], 0)   # target specialist still better
 
 
 class TestInDomainEvaluator(unittest.TestCase):
@@ -780,11 +900,57 @@ class TestCrossDomainEvaluator(unittest.TestCase):
             ev.evaluate_cross_domain("Politics", "Technology", _make_domain_df("Technology"))
 
 
+def _make_stub_perturbation_result(text: str, intensity: float) -> dict:
+    """Return a metadata dict with every key that apply_to_dataframe reads."""
+    words = tokenize_words(text)
+    n = len(words)
+    return {
+        "original_text": text,
+        "perturbed_text": text,
+        "perturbation_level": None,
+        "perturbation_rule": "stub",
+        "target_intensity": intensity,
+        "total_words": n,
+        "direct_lookup_words": 0,
+        "reverse_parent_lookup_words": 0,
+        "stemmed_lookup_words": 0,
+        "failed_lookup_words": n,
+        "eligible_words": 0,
+        "target_words": 0,
+        "words_changed": 0,
+        "actual_ratio_all_words": 0.0,
+        "actual_ratio_eligible_words": 0.0,
+        "is_same_as_original": True,
+        "similarity_in_range": False,
+        "perturbation_in_range": False,
+        "word_cosine_similarity_mean": float("nan"),
+        "word_cosine_similarity_min": float("nan"),
+        "word_cosine_similarity_max": float("nan"),
+        "replacements": [],
+    }
+
+
+def _make_stub_engine() -> PerturbationEngine:
+    """PerturbationEngine whose inner stub returns the full metadata dict
+    without touching the thesaurus, IndoBERT, or Sastrawi."""
+    engine = PerturbationEngine.__new__(PerturbationEngine)
+    engine.random_seed = 42
+    engine.sim_min = SIM_MIN
+    engine.sim_max = SIM_MAX
+    stub = MagicMock()
+    stub.perturb_with_metadata.side_effect = _make_stub_perturbation_result
+    engine.perturbation = stub
+    return engine
+
+
 class TestPerturbationEvaluator(unittest.TestCase):
+
+    def _make_stub_engine(self):
+        return _make_stub_engine()
 
     def test_evaluate_with_perturbation_keys(self):
         trainer = _make_fake_trainer()
-        engine = PerturbationEngine(42)
+        engine = self._make_stub_engine()
         ev = PerturbationEvaluator(trainer, engine)
         df = _make_domain_df("Sport", n=20)
         result = ev.evaluate_with_perturbation(df, "low", domain="Sport")
@@ -793,7 +959,7 @@ class TestPerturbationEvaluator(unittest.TestCase):
 
     def test_evaluate_all_levels_keys(self):
         trainer = _make_fake_trainer()
-        engine = PerturbationEngine(42)
+        engine = self._make_stub_engine()
         ev = PerturbationEvaluator(trainer, engine)
         df = _make_domain_df("Education", n=20)
         clean = InDomainEvaluator(trainer).evaluate(df)
@@ -806,7 +972,7 @@ class TestEvaluationEngine(unittest.TestCase):
 
     def _build_engine(self, tmpdir):
         trainers = {d: _make_fake_trainer(d) for d in DOMAINS}
-        engine = PerturbationEngine(42)
+        engine = _make_stub_engine()
         return EvaluationEngine(
             model_trainers=trainers,
             perturbation_engine=engine,
@@ -1383,23 +1549,31 @@ class TestSyntaxAllFiles(unittest.TestCase):
         ]
         self.assertEqual(defs, [],
                          "_make_serializable() still present in evaluation_engine.py")
-
-    def test_swap_is_not_noop(self):
-        """Regression: swap branch in _apply_typo must return None (real swap)."""
+    def test_semantic_engine_has_no_apply_typo(self):
+        """Regression: new semantic engine must NOT contain the old _apply_typo helper."""
         path = os.path.join(self.SRC_DIR, "perturbation_engine.py")
         with open(path) as f:
             tree = ast.parse(f.read())
-        # Find _apply_typo and check it has a `return None` branch
-        found_none_return = False
-        for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef) and node.name == "_apply_typo":
-                for child in ast.walk(node):
-                    if isinstance(child, ast.Return):
-                        val = child.value
-                        if val is None or (isinstance(val, ast.Constant) and val.value is None):
-                            found_none_return = True
-        self.assertTrue(found_none_return,
-                        "_apply_typo has no 'return None' branch — swap fix missing")
+        old_fns = [
+            node.name for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "_apply_typo"
+        ]
+        self.assertEqual(old_fns, [],
+                         "_apply_typo still present — old character-typo engine not removed")
+
+    def test_semantic_engine_has_perturbation_intensities(self):
+        """Regression: PERTURBATION_INTENSITIES constant must be defined at module level."""
+        path = os.path.join(self.SRC_DIR, "perturbation_engine.py")
+        with open(path) as f:
+            tree = ast.parse(f.read())
+        assigned = [
+            node.targets[0].id for node in ast.walk(tree)
+            if isinstance(node, ast.Assign)
+            and isinstance(getattr(node.targets[0], "id", None), str)
+            and node.targets[0].id == "PERTURBATION_INTENSITIES"
+        ]
+        self.assertGreater(len(assigned), 0,
+                           "PERTURBATION_INTENSITIES not found in perturbation_engine.py")
 
 
 # ══════════════════════════════════════════════════════════════════════════════

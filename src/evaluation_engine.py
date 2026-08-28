@@ -458,24 +458,172 @@ class PerturbationEvaluator:
     """
     Orchestrates perturbation testing across multiple levels.
     """
-    
+
     def __init__(
         self,
         model_trainer,
-        perturbation_engine
+        perturbation_engine,
+        perturbation_output_dir: Optional[str] = None
     ):
         """
         Initialize perturbation evaluator.
-        
+
         Args:
             model_trainer: ModelTrainer instance
             perturbation_engine: PerturbationEngine instance
+            perturbation_output_dir: Directory where perturbation data
+                                     will be saved.
         """
         self.model_trainer = model_trainer
         self.perturbation_engine = perturbation_engine
         self.metrics_calculator = MetricsCalculator()
+        self.perturbation_output_dir = perturbation_output_dir
+
         logger.info("PerturbationEvaluator initialized")
-    
+
+    def _save_perturbation_data(
+        self,
+        original_df: pd.DataFrame,
+        perturbed_df: pd.DataFrame,
+        level: str,
+        domain: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Save original and perturbed texts for every sample.
+
+        A perturbation is considered successful when the perturbed text
+        differs from the original text.
+
+        Failed perturbations are intentionally retained in the CSV so that
+        they can be inspected later.
+
+        Returns:
+            Dictionary containing success statistics.
+        """
+
+        if self.perturbation_output_dir is None:
+            logger.warning(
+                "Perturbation output directory is not configured. "
+                "Perturbation data will not be saved."
+            )
+            return {
+                'successful': 0,
+                'total': len(original_df),
+                'success_rate': 0.0
+            }
+
+        if len(original_df) != len(perturbed_df):
+            raise ValueError(
+                f"Perturbation changed dataframe size: "
+                f"original={len(original_df)}, "
+                f"perturbed={len(perturbed_df)}"
+            )
+
+        # Compare original and perturbed text.
+        original_texts = original_df['text'].astype(str).tolist()
+        perturbed_texts = perturbed_df['text'].astype(str).tolist()
+
+        successful = [
+            original != perturbed
+            for original, perturbed
+            in zip(original_texts, perturbed_texts)
+        ]
+
+        successful_count = int(sum(successful))
+        total_count = len(successful)
+
+        success_rate = (
+            successful_count / total_count
+            if total_count > 0
+            else 0.0
+        )
+
+        # ---------------------------------------------------------------
+        # Build artifact dataframe.
+        # Keep failed samples too.
+        # ---------------------------------------------------------------
+        saved_df = original_df.copy()
+
+        saved_df['original_text'] = original_texts
+        saved_df['perturbed_text'] = perturbed_texts
+        saved_df['perturbation_success'] = successful
+
+        # Optional but useful: make the original "text" column remain
+        # compatible with the dataset while clearly exposing the result.
+        saved_df['text'] = perturbed_texts
+
+        # Put original/perturbed text first.
+        preferred_columns = [
+            'id',
+            'source',
+            'date',
+            'domain',
+            'original_text',
+            'perturbed_text',
+            'text',
+            'label',
+            'url',
+            'perturbation_success'
+        ]
+
+        existing_preferred = [
+            col for col in preferred_columns
+            if col in saved_df.columns
+        ]
+
+        remaining_columns = [
+            col for col in saved_df.columns
+            if col not in existing_preferred
+        ]
+
+        saved_df = saved_df[
+            existing_preferred + remaining_columns
+        ]
+
+        # ---------------------------------------------------------------
+        # Save:
+        # /content/drive/MyDrive/thesis/results/perturb_data/
+        #     {model}/{domain}/{level}.csv
+        # ---------------------------------------------------------------
+        domain_name = str(domain).lower() if domain else "unknown"
+
+        domain_output_dir = os.path.join(
+            self.perturbation_output_dir,
+            domain_name
+        )
+
+        os.makedirs(domain_output_dir, exist_ok=True)
+
+        output_path = os.path.join(
+            domain_output_dir,
+            f"{level}.csv"
+        )
+
+        saved_df.to_csv(
+            output_path,
+            index=False,
+            encoding='utf-8-sig'
+        )
+
+        logger.info(
+            f"Perturbation data saved: {output_path}"
+        )
+
+        logger.info(
+            f"{domain_name.capitalize()} - "
+            f"{level.capitalize()}: "
+            f"{successful_count}/{total_count} successful "
+            f"perturbations "
+            f"({success_rate * 100:.2f}%)"
+        )
+
+        return {
+            'successful': successful_count,
+            'total': total_count,
+            'success_rate': success_rate,
+            'output_path': output_path
+        }
+
     def evaluate_with_perturbation(
         self,
         test_df: pd.DataFrame,
@@ -484,28 +632,39 @@ class PerturbationEvaluator:
     ) -> Dict[str, Any]:
         """
         Evaluate model on perturbed test data.
-        
-        Args:
-            test_df: Test DataFrame
-            perturbation_level: 'low', 'medium', or 'high'
-            domain: Domain name (for logging)
-            
-        Returns:
-            Dictionary with evaluation results
+
+        Failed perturbations are retained and counted separately.
         """
+
         domain_str = f" ({domain})" if domain else ""
+
         logger.info(
-            f"Evaluating with {perturbation_level}-level perturbation{domain_str}"
+            f"Evaluating with {perturbation_level}-level "
+            f"perturbation{domain_str}"
         )
-        
+
+        # ---------------------------------------------------------------
         # Apply perturbations
+        # ---------------------------------------------------------------
         original_texts = test_df['text'].tolist()
+
         perturbed_df = self.perturbation_engine.apply_to_dataframe(
             test_df.copy(),
             text_column='text',
             level=perturbation_level
         )
+
         perturbed_texts = perturbed_df['text'].tolist()
+
+        # ---------------------------------------------------------------
+        # Save perturbation data + calculate success count
+        # ---------------------------------------------------------------
+        perturbation_stats = self._save_perturbation_data(
+            original_df=test_df,
+            perturbed_df=perturbed_df,
+            level=perturbation_level,
+            domain=domain
+        )
 
         # ── debug: perturbation sample pairs ──────────────────────────────
         dbg_perturbation_samples(
@@ -514,30 +673,55 @@ class PerturbationEvaluator:
             originals=original_texts,
             perturbed=perturbed_texts,
         )
-        # ── debug: perturbation character/word change stats ────────────────
+
+        # ── debug: perturbation character/word change stats ──────────────
         import numpy as _np
+
         char_changes = [
             sum(1 for a, b in zip(o, p) if a != b) / max(len(o), 1)
             for o, p in zip(original_texts, perturbed_texts)
         ]
+
         word_changes = [
-            len(set(o.split()).symmetric_difference(set(p.split()))) / max(len(o.split()), 1)
+            len(
+                set(o.split()).symmetric_difference(
+                    set(p.split())
+                )
+            ) / max(len(o.split()), 1)
             for o, p in zip(original_texts, perturbed_texts)
         ]
+
         dbg_perturbation_stats(
             level=perturbation_level,
             domain=domain or "?",
             n_texts=len(perturbed_df),
-            char_change_mean=float(_np.mean(char_changes)) if char_changes else 0.0,
-            word_change_mean=float(_np.mean(word_changes)) if word_changes else 0.0,
+            char_change_mean=(
+                float(_np.mean(char_changes))
+                if char_changes else 0.0
+            ),
+            word_change_mean=(
+                float(_np.mean(word_changes))
+                if word_changes else 0.0
+            ),
         )
-        
+
+        # ---------------------------------------------------------------
         # Get predictions
+        # ---------------------------------------------------------------
         y_true = perturbed_df['label'].values
-        y_pred, y_proba = self.model_trainer.predict(perturbed_df['text'].tolist())
-        
+
+        y_pred, y_proba = self.model_trainer.predict(
+            perturbed_df['text'].tolist()
+        )
+
+        # ---------------------------------------------------------------
         # Calculate metrics
-        metrics = self.metrics_calculator.calculate_metrics(y_true, y_pred, y_proba)
+        # ---------------------------------------------------------------
+        metrics = self.metrics_calculator.calculate_metrics(
+            y_true,
+            y_pred,
+            y_proba
+        )
 
         # ── debug: metrics after perturbation ─────────────────────────────
         dbg_perturbation_metrics(
@@ -545,24 +729,43 @@ class PerturbationEvaluator:
             domain=domain or "?",
             metrics=metrics,
         )
-        
+
+        # ---------------------------------------------------------------
+        # Store results
+        # ---------------------------------------------------------------
         results = {
             'domain': domain,
             'perturbation_level': perturbation_level,
+
+            # Dataset size
             'num_samples': len(perturbed_df),
+
+            # Perturbation success statistics
+            'successful_perturbations': perturbation_stats['successful'],
+            'total_perturbation_attempts': perturbation_stats['total'],
+            'perturbation_success_rate': perturbation_stats['success_rate'],
+            'perturbation_data_path': perturbation_stats.get(
+                'output_path'
+            ),
+
+            # Evaluation metrics
             'metrics': metrics,
             'predictions': y_pred.tolist(),
             'probabilities': y_proba.tolist(),
             'true_labels': y_true.tolist()
         }
-        
+
         logger.info(
-            f"{perturbation_level.capitalize()}-level perturbation{domain_str} "
-            f"Macro-F1: {metrics['macro_f1']:.4f}"
+            f"{perturbation_level.capitalize()}-level perturbation"
+            f"{domain_str} "
+            f"Macro-F1: {metrics['macro_f1']:.4f} | "
+            f"Successful: "
+            f"{perturbation_stats['successful']}/"
+            f"{perturbation_stats['total']}"
         )
-        
+
         return results
-    
+
     def evaluate_all_levels(
         self,
         test_df: pd.DataFrame,
@@ -571,35 +774,37 @@ class PerturbationEvaluator:
     ) -> Dict[str, Dict[str, Any]]:
         """
         Evaluate model across all perturbation levels.
-        
-        Args:
-            test_df: Test DataFrame
-            clean_results: Results on clean (unperturbed) data
-            domain: Domain name
-            
-        Returns:
-            Dictionary mapping perturbation levels to results
         """
+
         levels = ['low', 'medium', 'high']
-        results = {'clean': clean_results}
-        
+
+        results = {
+            'clean': clean_results
+        }
+
         for level in levels:
-            results[level] = self.evaluate_with_perturbation(test_df, level, domain)
-            
+
+            results[level] = self.evaluate_with_perturbation(
+                test_df,
+                level,
+                domain
+            )
+
             # Calculate robustness metrics
             robustness = self.metrics_calculator.calculate_robustness_metrics(
                 clean_results['metrics'],
                 results[level]['metrics']
             )
+
             results[level]['robustness_metrics'] = robustness
 
-            # ── debug: robustness drop metrics ────────────────────────────
+            # ── debug: robustness drop metrics ───────────────────────────
             dbg_perturbation_robustness(
                 level=level,
                 domain=domain or "?",
                 rob=robustness,
             )
-        
+
         return results
 
 
@@ -612,26 +817,42 @@ class EvaluationEngine:
         self,
         model_trainers: Dict[str, Any],
         perturbation_engine,
-        output_dir: str = "evaluation_results"
+        output_dir: str = "evaluation_results",
+        perturbation_output_dir: Optional[str] = None
     ):
         """
         Initialize evaluation engine.
-        
+
         Args:
             model_trainers: Dictionary mapping domain names to ModelTrainer instances
             perturbation_engine: PerturbationEngine instance
             output_dir: Directory to save evaluation results
+            perturbation_output_dir: Directory to save generated perturbation data
         """
         self.model_trainers = model_trainers
         self.perturbation_engine = perturbation_engine
         self.output_dir = output_dir
-        
+        self.perturbation_output_dir = perturbation_output_dir
+
         # Initialize evaluators
         self.metrics_calculator = MetricsCalculator()
         self.cross_domain_evaluator = CrossDomainEvaluator(model_trainers)
-        
+
         os.makedirs(output_dir, exist_ok=True)
-        logger.info(f"EvaluationEngine initialized. Results will be saved to {output_dir}")
+
+        if perturbation_output_dir is not None:
+            os.makedirs(perturbation_output_dir, exist_ok=True)
+
+        logger.info(
+            f"EvaluationEngine initialized. "
+            f"Results will be saved to {output_dir}"
+        )
+
+        if perturbation_output_dir:
+            logger.info(
+                f"Perturbation data will be saved to "
+                f"{perturbation_output_dir}"
+            )
     
     def run_complete_evaluation(
         self,
@@ -711,8 +932,9 @@ class EvaluationEngine:
                     
                     # Evaluate with perturbations
                     evaluator = PerturbationEvaluator(
-                        self.model_trainers[domain],
-                        self.perturbation_engine
+                        model_trainer=self.model_trainers[domain],
+                        perturbation_engine=self.perturbation_engine,
+                        perturbation_output_dir=self.perturbation_output_dir
                     )
                     results['perturbation'][domain] = evaluator.evaluate_all_levels(
                         test_df,

@@ -17,5 +17,8 @@ plotly>=5.0.0
 # Utilities
 tqdm>=4.62.0
 
+# Indonesian NLP
+PySastrawi>=0.0.2
+
 # Optional
 # accelerate>=0.20.0  #for faster training with mixed precision

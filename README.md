@@ -8,7 +8,7 @@ This repository provides a robustness evaluation framework for Indonesian clickb
 
 - **Multi-Model Support:** Fine-tune and compare IndoBERT base, large, and lite variants
 - **Cross-Domain Evaluation:** 5×5 matrix across Technology, Politics, Health, Sport, and Education domains
-- **Perturbation Testing:** Three-level stress testing — character typos (low), informal slang injection (medium), synonym replacement (high)
+- **Perturbation Testing:** Three-level stress testing — all using the same contextual semantic word substitution method at 10% (low), 20% (medium), and 30% (high) intensity
 - **Error Analysis:** Linguistic pattern breakdown explaining *why* performance drops (sensational wording, numerical claims, rhetorical questions, named entities, domain jargon)
 - **Statistical Validation:** Bayesian signed-rank test with ROPE analysis, bootstrap confidence intervals, and paired/non-parametric significance tests
 - **Interactive Dashboard:** Streamlit interface for real-time predictions, cross-domain heatmaps, degradation curves, and automated reliability reports
@@ -17,14 +17,15 @@ This repository provides a robustness evaluation framework for Indonesian clickb
 ## Project Structure
 
 ```
-domain-shift-trustworthy-ai/
+responsible-ai-toolkit/
 ├── dataset/
-│   ├── data/                        # Per-domain CSV files
+│   ├── data/                        # Per-domain CSV files + thesaurus
 │   │   ├── technology.csv
 │   │   ├── politic.csv
 │   │   ├── health.csv
 │   │   ├── sport.csv
-│   │   └── education.csv
+│   │   ├── education.csv
+│   │   └── dict.json                # Indonesian Thesaurus (victoriasovereigne/tesaurus)
 │   ├── Dataset-description.md       # Dataset specifications and annotation details
 │   ├── dataset_eda.ipynb            # Exploratory data analysis notebook
 │   └── scrap.py                     # Web scraping utilities
@@ -32,7 +33,7 @@ domain-shift-trustworthy-ai/
 │   ├── config.py                    # Centralised configuration (models, training, paths, etc.)
 │   ├── data_manager.py              # Data loading, validation, stratified splitting, tokenisation
 │   ├── model_trainer.py             # Training loop, hyperparameter grid search, checkpoint saving
-│   ├── perturbation_engine.py       # Three-level text perturbation generator
+│   ├── perturbation_engine.py       # Contextual semantic perturbation engine (3 intensity levels)
 │   ├── evaluation_engine.py         # Metrics calculation and cross-domain evaluation orchestration
 │   ├── statistical_analyzer.py      # Bayesian tests, ROPE analysis, bootstrap CI
 │   ├── error_analyzer.py            # Linguistic error pattern analysis for misclassifications
@@ -67,10 +68,10 @@ graph TD
     K --> L[In-Domain Testing]
     K --> M[Cross-Domain 5×5 Matrix]
 
-    J --> N[Perturbation Engine]
-    N --> O[Low: Character Typos 5–10%]
-    N --> P[Medium: Informal Slang 15–25%]
-    N --> Q[High: Synonym Replacement 40–60%]
+    J --> N[Perturbation Engine<br/>Contextual Semantic Substitution]
+    N --> O[Low: 10% words substituted]
+    N --> P[Medium: 20% words substituted]
+    N --> Q[High: 30% words substituted]
 
     O & P & Q --> R[Perturbation Robustness Testing]
 
@@ -91,12 +92,33 @@ CSV schema: `id`, `source`, `date`, `title`, `Label`, `url`
 
 See [`dataset/Dataset-description.md`](dataset/Dataset-description.md) for full annotation guidelines and quality criteria.
 
+## Perturbation Engine Design
+
+All three perturbation levels use **the same underlying method**: contextual semantic word substitution via IndoBERT cosine similarity. The levels differ only in the fraction of words targeted.
+
+| Level | Intensity | Method |
+|-------|-----------|--------|
+| Low | 10% of words | Semantic synonym substitution |
+| Medium | 20% of words | Semantic synonym substitution |
+| High | 30% of words | Semantic synonym substitution |
+
+**Candidate generation:** Indonesian Thesaurus (`dataset/data/dict.json`, sourced from `victoriasovereigne/tesaurus`). Lookup cascade: direct → reverse synonym → Sastrawi-stemmed form.
+
+**Candidate filtering:**
+1. Same POS tag as original word
+2. Not the original word itself
+3. Not an antonym
+4. IndoBERT contextual cosine similarity in **[0.80, 0.95]** — scored as `original_word_in_original_context` vs `candidate_word_in_modified_context`
+
+The candidate with the highest similarity ≤ 0.95 is selected.
+
 ## Technology Stack
 
 | Category | Libraries |
 |---|---|
 | Model / Training | PyTorch, Hugging Face Transformers |
 | Data Processing | Pandas, NumPy, scikit-learn |
+| Indonesian NLP | PySastrawi (Stemmer for thesaurus lookup) |
 | Statistical Analysis | SciPy (Wilcoxon, Mann-Whitney U, paired t-test), custom Bayesian signed-rank |
 | Visualisation / Dashboard | Streamlit, Plotly |
 | Utilities | tqdm |
@@ -113,8 +135,8 @@ See [`dataset/Dataset-description.md`](dataset/Dataset-description.md) for full 
 ### Setup
 
 ```bash
-git clone https://github.com/gredss/domain-shift-trustworthy-ai
-cd domain-shift-trustworthy-ai
+git clone https://github.com/gredss/responsible-ai-toolkit
+cd responsible-ai-toolkit
 pip install -r requirements.txt
 ```
 
@@ -141,11 +163,14 @@ python src/train_pipeline.py --model base --device cuda
 ### Run evaluation
 
 ```bash
-# Evaluate single model
+# Evaluate single model (thesaurus path defaults to dataset/data/dict.json)
 python src/evaluate_pipeline.py --model base
 
 # Evaluate all models
 python src/evaluate_pipeline.py --model all
+
+# Override thesaurus path (e.g. on Colab with a Drive copy)
+python src/evaluate_pipeline.py --model base --thesaurus-path /content/dict.json
 
 # Skip perturbation testing (faster)
 python src/evaluate_pipeline.py --model base --skip-perturbation
@@ -201,7 +226,7 @@ Each stage is identified by a bracketed header so output can be grepped by stage
 | `[ClickbaitDataset]` | Dataset construction | Total samples, clickbait ratio, and tokenisation samples at the point a `ClickbaitDataset` is created |
 | `[ModelTrainer]` | Training & inference | Model init parameters (device, max length, dropout); every 50th batch: input shape, raw logits, predicted labels, and loss; per-epoch train and validation metrics; predict call summary, per-batch logits/predictions, and final label counts |
 | `[Evaluation]` | In-domain & cross-domain | Full metric dict (accuracy, precision, recall, F1, MCC, ROC-AUC) per domain; confusion matrix; Source Drop and Target Drop domain-shift values |
-| `[Perturbation]` | Text perturbation | 3 before/after text pairs per level and domain; mean character and word change ratios; per-level metrics; absolute and relative robustness drop |
+| `[Perturbation]` | Text perturbation | 3 before/after text pairs per level and domain; mean word change ratios per level; actual vs. target intensity; per-level metrics; absolute and relative robustness drop |
 | `[Statistics]` | Statistical tests | Input score arrays (mean, std, range) for both models; Bayesian signed-rank output (p-value, effect size, credible interval, ROPE decision); ROPE analysis (probability in ROPE, all credible interval levels); bootstrap CI; paired t-test and Mann-Whitney U results |
 | `[ErrorAnalysis]` | Linguistic error patterns | Error count and rate per condition; pattern attribution ranked from highest to lowest driver; top global error driver |
 
@@ -212,7 +237,7 @@ Each stage is identified by a bracketed header so output can be grepped by stage
 | `config.py` | Single source of truth for all hyperparameters, paths, and thresholds |
 | `data_manager.py` | Loads per-domain CSVs, validates schema, stratified train/val/test split (70/15/15), tokenises with IndoBERT tokeniser |
 | `model_trainer.py` | Fine-tunes `BertForSequenceClassification`, AdamW + linear warmup scheduler, optional grid search, checkpoint saving |
-| `perturbation_engine.py` | Applies low / medium / high perturbations via independent seeded random streams |
+| `perturbation_engine.py` | Contextual semantic word substitution at three intensities (10/20/30%) using IndoBERT cosine similarity + Indonesian Thesaurus |
 | `evaluation_engine.py` | Computes accuracy, precision, recall, F1, MCC, ROC-AUC; orchestrates in-domain, cross-domain, and perturbation scenarios |
 | `statistical_analyzer.py` | Bayesian signed-rank test, ROPE analysis, bootstrap CI, Wilcoxon, Mann-Whitney U, Cohen's d |
 | `error_analyzer.py` | Identifies linguistic patterns in misclassified headlines (sensational wording, numerical claims, rhetorical questions, named entities, domain jargon) |
@@ -227,7 +252,7 @@ Each stage is identified by a bracketed header so output can be grepped by stage
 ## Evaluation Metrics
 
 - **Classification:** Accuracy, Precision, Recall, F1-Score, MCC, ROC-AUC
-- **Robustness:** Source Drop (SD), Target Drop (TD), Performance Degradation across perturbation levels
+- **Robustness:** Source Drop (SD), Target Drop (TD), Performance Degradation across perturbation levels, word change ratio per level
 - **Statistical:** Bayesian signed-rank with ROPE (threshold = 0.01), bootstrap 95% CI, Wilcoxon signed-rank, Mann-Whitney U, paired t-test, Cohen's d effect size
 
 ## License
